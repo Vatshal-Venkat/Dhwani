@@ -358,71 +358,50 @@ function App() {
     return `${mins.toString().padStart(2, '0')}:${remainingSecs.toString().padStart(2, '0')}`;
   };
 
-  const getStatusColor = () => {
-    switch (status) {
-      case 'dialing': return 'text-amber-400 border-amber-400';
-      case 'connected': return 'text-indigo-400 border-indigo-400';
-      case 'listening': return 'text-emerald-400 border-emerald-400';
-      case 'thinking': return 'text-cyan-400 border-cyan-400';
-      case 'speaking': return 'text-purple-400 border-purple-400';
-      case 'disconnected': return 'text-slate-400 border-slate-400';
-      case 'error': return 'text-rose-500 border-rose-500';
-      default: return 'text-slate-400 border-slate-700';
-    }
-  };
-
   return (
-    <div className="min-h-screen p-6 md:p-12 flex flex-col items-center justify-start max-w-7xl mx-auto">
+    <div className="app-container">
       {/* Top Header */}
-      <header className="w-full flex items-center justify-between mb-8 pb-4 border-b border-[rgba(255,255,255,0.06)]">
-        <div className="flex items-center gap-3">
-          <div className="h-10 w-10 rounded-xl bg-gradient-to-tr from-indigo-500 to-cyan-500 flex items-center justify-center shadow-lg shadow-indigo-500/20">
+      <header className="app-header">
+        <div className="brand-section">
+          <div className="logo-container">
             <Activity className="h-5 w-5 text-white" />
           </div>
           <div>
-            <h1 className="text-xl font-bold tracking-tight text-white">Antigravity</h1>
-            <p className="text-xs text-[#94a3b8]">Outbound AI Voice Agent Simulation Suite</p>
+            <h1 className="brand-title">Dhwani</h1>
+            <p className="brand-subtitle">Outbound AI Voice Agent Simulation Suite</p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="h-2.5 w-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
-          <span className="text-xs font-semibold text-slate-300">Backend Connected</span>
+        <div className="connection-status">
+          <span className="connection-status-dot"></span>
+          <span>Simulator Connected</span>
         </div>
       </header>
 
       {/* Main Grid */}
-      <div className="w-full grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+      <div className="dashboard-grid">
         
-        {/* Left Column: Call Config Panel (5 cols) */}
-        <section className="lg:col-span-4 space-y-6">
-          <div className="glass-panel p-6 space-y-6">
-            <div className="flex items-center gap-2 border-b border-[rgba(255,255,255,0.06)] pb-3">
-              <SettingsIcon className="h-4 w-4 text-indigo-400" />
-              <h2 className="text-md font-semibold text-white">Call Configurations</h2>
-            </div>
+        {/* Left Column: Call Config Panel */}
+        <section className="glass-panel">
+          <div className="panel-header">
+            <SettingsIcon className="panel-icon" />
+            <h2 className="panel-title">Call Configurations</h2>
+          </div>
 
+          <div className="form-content">
             {/* Provider selection */}
-            <div className="space-y-2">
-              <label className="text-xs font-medium text-slate-300 block">LLM Provider</label>
-              <div className="grid grid-cols-2 gap-2">
+            <div className="input-group">
+              <label className="input-label">LLM Provider</label>
+              <div className="provider-toggle-grid">
                 <button 
                   onClick={() => { setProvider('gemini'); setModel('gemini-1.5-flash'); }}
-                  className={`py-2 px-3 rounded-md text-xs font-semibold border transition-all ${
-                    provider === 'gemini' 
-                      ? 'bg-indigo-600/20 border-indigo-500 text-white' 
-                      : 'bg-slate-900/40 border-slate-800 text-slate-400 hover:border-slate-700'
-                  }`}
+                  className={`btn-toggle ${provider === 'gemini' ? 'active' : ''}`}
                   disabled={callActive}
                 >
                   Google Gemini
                 </button>
                 <button 
                   onClick={() => { setProvider('groq'); setModel('llama3-8b-8192'); }}
-                  className={`py-2 px-3 rounded-md text-xs font-semibold border transition-all ${
-                    provider === 'groq' 
-                      ? 'bg-indigo-600/20 border-indigo-500 text-white' 
-                      : 'bg-slate-900/40 border-slate-800 text-slate-400 hover:border-slate-700'
-                  }`}
+                  className={`btn-toggle ${provider === 'groq' ? 'active' : ''}`}
                   disabled={callActive}
                 >
                   Groq Cloud
@@ -430,41 +409,25 @@ function App() {
               </div>
             </div>
 
-            {/* API Keys (Saved locally) */}
-            <div className="space-y-3">
-              <label className="text-xs font-medium text-slate-300 block">API Credentials</label>
-              
-              {provider === 'gemini' ? (
-                <div className="relative">
-                  <Key className="absolute left-3 top-3.5 h-4 w-4 text-slate-500" />
-                  <input 
-                    type="password"
-                    placeholder="Enter Gemini API Key..."
-                    value={geminiKey}
-                    onChange={(e) => setGeminiKey(e.target.value)}
-                    className="input-field pl-10"
-                    disabled={callActive}
-                  />
-                </div>
-              ) : (
-                <div className="relative">
-                  <Key className="absolute left-3 top-3.5 h-4 w-4 text-slate-500" />
-                  <input 
-                    type="password"
-                    placeholder="Enter Groq API Key..."
-                    value={groqKey}
-                    onChange={(e) => setGroqKey(e.target.value)}
-                    className="input-field pl-10"
-                    disabled={callActive}
-                  />
-                </div>
-              )}
-              <p className="text-[10px] text-slate-500">API keys are stored strictly in local browser storage.</p>
+            {/* API Credentials */}
+            <div className="input-group">
+              <label className="input-label">API Credentials</label>
+              <div className="input-with-icon">
+                <Key className="input-icon" />
+                <input 
+                  type="password"
+                  placeholder={provider === 'gemini' ? "Enter Gemini API Key..." : "Enter Groq API Key..."}
+                  value={provider === 'gemini' ? geminiKey : groqKey}
+                  onChange={(e) => provider === 'gemini' ? setGeminiKey(e.target.value) : setGroqKey(e.target.value)}
+                  className="input-field"
+                  disabled={callActive}
+                />
+              </div>
             </div>
 
             {/* Voice Selection */}
-            <div className="space-y-2">
-              <label className="text-xs font-medium text-slate-300 block">Agent Accent & Voice</label>
+            <div className="input-group">
+              <label className="input-label">Agent Accent & Voice</label>
               <select
                 value={voice}
                 onChange={(e) => setVoice(e.target.value)}
@@ -484,8 +447,8 @@ function App() {
             </div>
 
             {/* Greeting */}
-            <div className="space-y-2">
-              <label className="text-xs font-medium text-slate-300 block">Opening Greeting Line</label>
+            <div className="input-group">
+              <label className="input-label">Opening Greeting Line</label>
               <input 
                 type="text"
                 value={greeting}
@@ -496,13 +459,13 @@ function App() {
             </div>
 
             {/* Prompt Config */}
-            <div className="space-y-2">
-              <label className="text-xs font-medium text-slate-300 block">Agent Persona & Prompt</label>
+            <div className="input-group">
+              <label className="input-label">Agent Persona & Prompt</label>
               <textarea 
                 rows="4"
                 value={systemPrompt}
                 onChange={(e) => setSystemPrompt(e.target.value)}
-                className="input-field resize-none text-xs"
+                className="input-field"
                 placeholder="Give instructions to the agent..."
                 disabled={callActive}
               />
@@ -510,188 +473,157 @@ function App() {
           </div>
         </section>
 
-        {/* Center Column: Phone UI Simulation (4 cols) */}
-        <section className="lg:col-span-4 flex flex-col items-center justify-center">
-          <div className="glass-panel w-full max-w-sm p-8 flex flex-col items-center justify-between text-center relative min-h-[500px]">
-            
-            {/* Visualizer Status & Key info */}
-            <div className="w-full flex justify-between items-center text-xs text-slate-400 font-semibold border-b border-[rgba(255,255,255,0.06)] pb-4">
-              <span>SIMULATED CELLULAR</span>
-              <span className="flex items-center gap-1.5">
-                <span className={`h-2 w-2 rounded-full ${callActive ? 'bg-indigo-500 animate-ping' : 'bg-slate-600'}`}></span>
-                {callActive ? 'IN CALL' : 'IDLE'}
-              </span>
+        {/* Center Column: Phone UI Simulation */}
+        <section className="glass-panel simulator-panel">
+          <div className="simulator-header">
+            <span>SIMULATED CELLULAR</span>
+            <div className="call-state-indicator">
+              <span className={`call-state-dot ${callActive ? 'active' : ''}`}></span>
+              <span>{callActive ? 'IN CALL' : 'IDLE'}</span>
             </div>
+          </div>
 
-            {/* Circular Pulse Interaction Center */}
-            <div className="my-8 relative flex items-center justify-center">
-              {/* Animated outer circles */}
-              {callActive && (
-                <>
-                  <div className="absolute w-44 h-44 rounded-full border border-indigo-500/20 animate-ping" style={{ animationDuration: '3s' }}></div>
-                  <div className="absolute w-36 h-36 rounded-full border border-cyan-500/30 animate-pulse"></div>
-                </>
-              )}
-
-              {/* Main status indicator disc */}
-              <div className={`h-28 w-28 rounded-full flex flex-col items-center justify-center relative transition-all duration-500 ${
-                callActive 
-                  ? 'bg-gradient-to-br from-indigo-900 to-indigo-950 shadow-[0_0_30px_rgba(79,70,229,0.3)] border-2 border-indigo-500' 
-                  : 'bg-slate-900/60 border border-slate-800'
-              }`}>
-                {callActive ? (
-                  status === 'speaking' ? (
-                    <Volume2 className="h-8 w-8 text-indigo-400 animate-bounce" />
-                  ) : status === 'thinking' ? (
-                    <RefreshCw className="h-8 w-8 text-cyan-400 animate-spin" />
-                  ) : (
-                    <Mic className="h-8 w-8 text-emerald-400 animate-pulse" />
-                  )
-                ) : (
-                  <Phone className="h-8 w-8 text-slate-500" />
-                )}
-              </div>
-            </div>
-
-            {/* Info details */}
-            <div className="space-y-2 w-full">
+          {/* Glowing Pulse Visualizer */}
+          <div className={`visualizer-outer state-${callActive ? status : 'idle'}`}>
+            <div className="visualizer-pulse-bg"></div>
+            <div className="visualizer-core">
               {callActive ? (
-                <>
-                  <div className="text-2xl font-bold text-white tracking-wider font-heading">
-                    {formatTime(callDuration)}
-                  </div>
-                  <div className="text-xs font-semibold uppercase tracking-widest text-[#94a3b8] flex items-center justify-center gap-1">
-                    Status: 
-                    <span className={`font-bold capitalize ${
-                      status === 'listening' ? 'text-emerald-400' :
-                      status === 'thinking' ? 'text-cyan-400' :
-                      status === 'speaking' ? 'text-purple-400' :
-                      'text-indigo-400'
-                    }`}>
-                      {status}
-                    </span>
-                  </div>
-                </>
+                status === 'speaking' ? (
+                  <Volume2 className="visualizer-icon" />
+                ) : status === 'thinking' ? (
+                  <RefreshCw className="visualizer-icon" />
+                ) : (
+                  <Mic className="visualizer-icon" />
+                )
               ) : (
-                <>
-                  <div className="text-lg font-bold text-white">Start Conversation</div>
-                  <p className="text-xs text-slate-400 max-w-[240px] mx-auto">
-                    Initiate an outbound voice simulation calling through your web browser.
-                  </p>
-                </>
+                <Phone className="visualizer-icon" style={{ opacity: 0.4 }} />
               )}
             </div>
+          </div>
 
-            {/* Error notifications */}
-            {errorMessage && (
-              <div className="my-2 p-2 bg-rose-900/20 border border-rose-950 text-rose-300 text-xs rounded-md w-full">
-                {errorMessage}
+          {/* Info Details */}
+          <div className="call-info-wrapper">
+            {callActive ? (
+              <>
+                <div className="call-timer">
+                  {formatTime(callDuration)}
+                </div>
+                <div className="call-status-label">
+                  STATUS: 
+                  <span className={`status-badge-inline ${status}`}>
+                    {status}
+                  </span>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="call-timer" style={{ fontSize: '20px', letterSpacing: 'normal' }}>Start Conversation</div>
+                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '8px', maxWidth: '240px', marginLeft: 'auto', marginRight: 'auto' }}>
+                  Initiate an outbound voice simulation calling through your web browser.
+                </p>
+              </>
+            )}
+          </div>
+
+          {/* Error Banner */}
+          {errorMessage && (
+            <div className="error-banner">
+              {errorMessage}
+            </div>
+          )}
+
+          {/* Call Control Button */}
+          <div className="call-controls">
+            {callActive ? (
+              <button 
+                onClick={handleHangUp}
+                className="btn-call-action hangup"
+              >
+                <PhoneOff className="h-5 w-5" />
+                Hang Up Call
+              </button>
+            ) : (
+              <button 
+                onClick={handleStartCall}
+                className="btn-call-action start"
+              >
+                <Phone className="h-5 w-5" />
+                Initiate Simulator
+              </button>
+            )}
+          </div>
+
+          {/* Wave animation during speak/listen */}
+          <div className="wave-container">
+            {callActive && (
+              <div className={`wave-active`}>
+                <span className="wave-bar"></span>
+                <span className="wave-bar"></span>
+                <span className="wave-bar"></span>
+                <span className="wave-bar"></span>
+                <span className="wave-bar"></span>
+                <span className="wave-bar"></span>
+                <span className="wave-bar"></span>
               </div>
             )}
-
-            {/* Call Control Button */}
-            <div className="w-full pt-6 border-t border-[rgba(255,255,255,0.06)] flex justify-center">
-              {callActive ? (
-                <button 
-                  onClick={handleHangUp}
-                  className="w-full flex items-center justify-center gap-2 bg-rose-600 hover:bg-rose-500 text-white font-semibold py-3 px-6 rounded-xl transition-all shadow-lg shadow-rose-900/30"
-                >
-                  <PhoneOff className="h-5 w-5" />
-                  Hang Up Call
-                </button>
-              ) : (
-                <button 
-                  onClick={handleStartCall}
-                  className="w-full flex items-center justify-center gap-2 bg-gradient-to-r from-indigo-500 to-cyan-500 hover:from-indigo-600 hover:to-cyan-600 text-white font-semibold py-3 px-6 rounded-xl transition-all shadow-lg shadow-indigo-500/20"
-                >
-                  <Phone className="h-5 w-5 animate-pulse" />
-                  Initiate Simulator
-                </button>
-              )}
-            </div>
-
-            {/* Wave animation during speak/listen */}
-            <div className="mt-4 flex items-center justify-center h-10 w-full">
-              {callActive && (
-                <div className={`flex items-end h-8 ${status === 'speaking' || status === 'listening' ? 'wave-active' : ''}`}>
-                  <span className="wave-bar"></span>
-                  <span className="wave-bar"></span>
-                  <span className="wave-bar"></span>
-                  <span className="wave-bar"></span>
-                  <span className="wave-bar"></span>
-                  <span className="wave-bar"></span>
-                  <span className="wave-bar"></span>
-                </div>
-              )}
-            </div>
-
           </div>
         </section>
 
-        {/* Right Column: Live Transcript Panel (5 cols) */}
-        <section className="lg:col-span-4 space-y-6">
-          <div className="glass-panel p-6 flex flex-col h-[500px]">
-            <div className="flex items-center gap-2 border-b border-[rgba(255,255,255,0.06)] pb-3 mb-4 shrink-0">
-              <MessageSquare className="h-4 w-4 text-cyan-400" />
-              <h2 className="text-md font-semibold text-white">Live Call Logs & Transcript</h2>
-            </div>
+        {/* Right Column: Live Transcript Panel */}
+        <section className="glass-panel transcript-panel">
+          <div className="panel-header" style={{ padding: '0 0 16px 0', borderBottom: '1px solid var(--glass-border)', marginBottom: '20px' }}>
+            <MessageSquare className="panel-icon" style={{ color: 'var(--accent-cyan)' }} />
+            <h2 className="panel-title">Live Call Logs & Transcript</h2>
+          </div>
 
-            {/* Transcript scroll box */}
-            <div className="flex-1 overflow-y-auto pr-1 space-y-4 text-sm scroll-smooth">
-              {transcripts.length === 0 ? (
-                <div className="h-full flex flex-col items-center justify-center text-slate-500 space-y-2">
-                  <VolumeX className="h-8 w-8 text-slate-700" />
-                  <p className="text-xs">No active conversation logs.</p>
-                  <p className="text-[10px] text-slate-600 text-center max-w-[200px]">
-                    Transcripts will appear here in real-time when the call is initiated.
-                  </p>
-                </div>
-              ) : (
-                transcripts.map(log => {
-                  if (log.role === 'system') {
-                    return (
-                      <div key={log.id} className="text-center">
-                        <span className="inline-block py-1 px-3 bg-slate-900/60 border border-slate-950 text-slate-500 rounded-full text-[10px] uppercase font-semibold tracking-wider">
-                          {log.text}
-                        </span>
-                      </div>
-                    );
-                  }
-                  
-                  const isAgent = log.role === 'agent';
+          {/* Transcript Scroll Area */}
+          <div className="transcript-scroll">
+            {transcripts.length === 0 ? (
+              <div className="transcript-empty">
+                <VolumeX className="transcript-empty-icon" />
+                <p className="transcript-empty-text">
+                  No active conversation logs. Transcripts will appear here in real-time when the call is initiated.
+                </p>
+              </div>
+            ) : (
+              transcripts.map(log => {
+                if (log.role === 'system') {
                   return (
-                    <div 
-                      key={log.id} 
-                      className={`flex flex-col max-w-[85%] ${isAgent ? 'mr-auto items-start' : 'ml-auto items-end'}`}
-                    >
-                      <div className={`px-4 py-3 rounded-2xl ${
-                        isAgent 
-                          ? 'bg-slate-800/80 border border-slate-750 text-slate-100 rounded-tl-sm' 
-                          : 'bg-indigo-600 text-white rounded-tr-sm shadow-md shadow-indigo-600/10'
-                      }`}>
-                        <p className="text-xs leading-relaxed">{log.text}</p>
-                      </div>
-                      <span className="text-[9px] text-slate-500 mt-1 px-1">
-                        {isAgent ? 'Agent' : 'You'} • {log.timestamp}
+                    <div key={log.id} className="system-pill-wrapper">
+                      <span className="system-pill">
+                        {log.text}
                       </span>
                     </div>
                   );
-                })
-              )}
-            </div>
-
-            {/* Small turn-taking helper tips */}
-            {callActive && (
-              <div className="border-t border-[rgba(255,255,255,0.06)] pt-3 mt-3 shrink-0 text-center">
-                <span className="text-[10px] text-slate-500">
-                  {status === 'listening' ? '🎤 Go ahead and speak now!' :
-                   status === 'speaking' ? '🔊 Agent is currently talking. Please wait.' :
-                   status === 'thinking' ? '⚙️ Agent is thinking...' :
-                   'Preparing conversation...'}
-                </span>
-              </div>
+                }
+                
+                const isAgent = log.role === 'agent';
+                return (
+                  <div 
+                    key={log.id} 
+                    className={`bubble-wrapper ${isAgent ? 'agent' : 'user'}`}
+                  >
+                    <div className="bubble-content">
+                      <p>{log.text}</p>
+                    </div>
+                    <span className="bubble-meta">
+                      {isAgent ? 'Agent' : 'You'} • {log.timestamp}
+                    </span>
+                  </div>
+                );
+              })
             )}
           </div>
+
+          {/* Helper Tips */}
+          {callActive && (
+            <div className="turn-helper-footer">
+              {status === 'listening' ? '🎤 Go ahead and speak now!' :
+               status === 'speaking' ? '🔊 Agent is currently talking. Please wait.' :
+               status === 'thinking' ? '⚙️ Agent is thinking...' :
+               'Preparing conversation...'}
+            </div>
+          )}
         </section>
         
       </div>
