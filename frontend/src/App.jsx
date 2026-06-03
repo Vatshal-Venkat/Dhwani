@@ -11,8 +11,10 @@ import {
   Database, 
   Key, 
   MessageSquare, 
-  Activity 
+  Activity
 } from 'lucide-react';
+
+
 
 function App() {
   // Call configuration state
@@ -30,12 +32,14 @@ function App() {
   );
   const [greeting, setGreeting] = useState("Hi there! This is Alex calling from SmartHome Solutions. Am I speaking with the homeowner?");
 
+
   // Call runtime state
   const [status, setStatus] = useState('idle'); // idle, dialing, connected, listening, thinking, speaking, disconnected, error
   const [callActive, setCallActive] = useState(false);
   const [callDuration, setCallDuration] = useState(0);
   const [transcripts, setTranscripts] = useState([]);
   const [errorMessage, setErrorMessage] = useState('');
+  const [interimSpeech, setInterimSpeech] = useState('');
   
   // WebSockets and Audio References
   const wsRef = useRef(null);
@@ -116,36 +120,67 @@ function App() {
 
     const recognition = new SpeechRecognition();
     recognition.continuous = false;
-    recognition.interimResults = false;
+    recognition.interimResults = true;
     recognition.lang = 'en-US';
 
     recognition.onstart = () => {
       if (callActiveRef.current && !isSpeakingRef.current) {
         setStatus('listening');
+        setInterimSpeech('');
       }
     };
 
     recognition.onresult = (event) => {
-      const resultText = event.results[0][0].transcript;
-      if (resultText && resultText.trim()) {
-        addTranscript('user', resultText);
+      let interimTranscript = '';
+      let finalTranscript = '';
+      
+      for (let i = event.resultIndex; i < event.results.length; ++i) {
+        if (event.results[i].isFinal) {
+          finalTranscript += event.results[i][0].transcript;
+        } else {
+          interimTranscript += event.results[i][0].transcript;
+        }
+      }
+      
+      if (interimTranscript) {
+        setInterimSpeech(interimTranscript);
+      }
+      
+      if (finalTranscript && finalTranscript.trim()) {
+        setInterimSpeech('');
+        addTranscript('user', finalTranscript);
         
         // Send user transcript to WebSocket backend
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
           setStatus('thinking');
           wsRef.current.send(JSON.stringify({
             type: 'user_speech',
-            text: resultText
+            text: finalTranscript
           }));
         }
       }
     };
 
     recognition.onerror = (event) => {
-      // Ignore no-speech errors which occur during pauses
-      if (event.error !== 'no-speech') {
-        console.error("Speech Recognition Error:", event.error);
+      if (event.error === 'no-speech') {
+        // Ignore silent periods
+        return;
       }
+      
+      console.error("Speech Recognition Error:", event.error);
+      
+      let friendlyMessage = `Speech Recognition Error: ${event.error}`;
+      if (event.error === 'not-allowed') {
+        friendlyMessage = "Microphone access denied. Please enable microphone permissions in your browser settings.";
+      } else if (event.error === 'audio-capture') {
+        friendlyMessage = "No microphone detected. Please connect a microphone and try again.";
+      }
+      
+      setErrorMessage(friendlyMessage);
+      setStatus('error');
+      
+      // Clean up connection and stop loop
+      handleHangUp();
     };
 
     recognition.onend = () => {
@@ -346,6 +381,7 @@ function App() {
 
     isSpeakingRef.current = false;
     setCallActive(false);
+    setInterimSpeech('');
     if (status !== 'error') {
       setStatus('disconnected');
     }
@@ -569,62 +605,69 @@ function App() {
           </div>
         </section>
 
-        {/* Right Column: Live Transcript Panel */}
-        <section className="glass-panel transcript-panel">
-          <div className="panel-header" style={{ padding: '0 0 16px 0', borderBottom: '1px solid var(--glass-border)', marginBottom: '20px' }}>
-            <MessageSquare className="panel-icon" style={{ color: 'var(--accent-cyan)' }} />
-            <h2 className="panel-title">Live Call Logs & Transcript</h2>
-          </div>
+        {/* Right Column */}
+        <div className="right-column">
+          {/* Live Transcript Panel */}
+          <section className="glass-panel transcript-panel">
+            <div className="panel-header" style={{ padding: '0 0 16px 0', borderBottom: '1px solid var(--glass-border)', marginBottom: '20px' }}>
+              <MessageSquare className="panel-icon" style={{ color: 'var(--accent-cyan)' }} />
+              <h2 className="panel-title">Live Call Logs & Transcript</h2>
+            </div>
 
-          {/* Transcript Scroll Area */}
-          <div className="transcript-scroll">
-            {transcripts.length === 0 ? (
-              <div className="transcript-empty">
-                <VolumeX className="transcript-empty-icon" />
-                <p className="transcript-empty-text">
-                  No active conversation logs. Transcripts will appear here in real-time when the call is initiated.
-                </p>
-              </div>
-            ) : (
-              transcripts.map(log => {
-                if (log.role === 'system') {
+            {/* Transcript Scroll Area */}
+            <div className="transcript-scroll">
+              {transcripts.length === 0 ? (
+                <div className="transcript-empty">
+                  <VolumeX className="transcript-empty-icon" />
+                  <p className="transcript-empty-text">
+                    No active conversation logs. Transcripts will appear here in real-time when the call is initiated.
+                  </p>
+                </div>
+              ) : (
+                transcripts.map(log => {
+                  if (log.role === 'system') {
+                    return (
+                      <div key={log.id} className="system-pill-wrapper">
+                        <span className="system-pill">
+                          {log.text}
+                        </span>
+                      </div>
+                    );
+                  }
+                  
+                  const isAgent = log.role === 'agent';
                   return (
-                    <div key={log.id} className="system-pill-wrapper">
-                      <span className="system-pill">
-                        {log.text}
+                    <div 
+                      key={log.id} 
+                      className={`bubble-wrapper ${isAgent ? 'agent' : 'user'}`}
+                    >
+                      <div className="bubble-content">
+                        <p>{log.text}</p>
+                      </div>
+                      <span className="bubble-meta">
+                        {isAgent ? 'Agent' : 'You'} • {log.timestamp}
                       </span>
                     </div>
                   );
-                }
-                
-                const isAgent = log.role === 'agent';
-                return (
-                  <div 
-                    key={log.id} 
-                    className={`bubble-wrapper ${isAgent ? 'agent' : 'user'}`}
-                  >
-                    <div className="bubble-content">
-                      <p>{log.text}</p>
-                    </div>
-                    <span className="bubble-meta">
-                      {isAgent ? 'Agent' : 'You'} • {log.timestamp}
-                    </span>
-                  </div>
-                );
-              })
-            )}
-          </div>
-
-          {/* Helper Tips */}
-          {callActive && (
-            <div className="turn-helper-footer">
-              {status === 'listening' ? '🎤 Go ahead and speak now!' :
-               status === 'speaking' ? '🔊 Agent is currently talking. Please wait.' :
-               status === 'thinking' ? '⚙️ Agent is thinking...' :
-               'Preparing conversation...'}
+                })
+              )}
             </div>
-          )}
-        </section>
+
+            {/* Helper Tips */}
+            {callActive && (
+              <div className="turn-helper-footer">
+                {status === 'listening' ? (
+                  interimSpeech ? `🎤 "${interimSpeech}"` : '🎤 Go ahead and speak now!'
+                ) :
+                 status === 'speaking' ? '🔊 Agent is currently talking. Please wait.' :
+                 status === 'thinking' ? '⚙️ Agent is thinking...' :
+                 'Preparing conversation...'}
+              </div>
+            )}
+          </section>
+
+
+        </div>
         
       </div>
     </div>
