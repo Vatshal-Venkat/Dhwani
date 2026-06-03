@@ -6,31 +6,34 @@ import logging
 logger = logging.getLogger("voice-agent")
 
 class LLMService:
-    def __init__(self, provider: str = None, model: str = None):
+    def __init__(self, provider: str = None, model: str = None, api_key: str = None):
         self.provider = provider or settings.LLM_PROVIDER
         self.model = model or settings.LLM_MODEL
         
         self.gemini_client = None
         self.groq_client = None
+        self.api_key = api_key
         
         if self.provider == "gemini":
-            api_key = settings.GEMINI_API_KEY
-            if not api_key:
+            if not self.api_key:
+                self.api_key = settings.GEMINI_API_KEY
+            if not self.api_key:
                 logger.warning("GEMINI_API_KEY is not set.")
-            genai.configure(api_key=api_key)
+            genai.configure(api_key=self.api_key)
         elif self.provider == "groq":
-            api_key = settings.GROQ_API_KEY
-            if not api_key:
+            if not self.api_key:
+                self.api_key = settings.GROQ_API_KEY
+            if not self.api_key:
                 logger.warning("GROQ_API_KEY is not set.")
-            self.groq_client = Groq(api_key=api_key)
+            self.groq_client = Groq(api_key=self.api_key)
 
     async def get_response(self, history: list, system_prompt: str) -> str:
         """
         Generates LLM completion based on history.
         history format: [{"role": "user"/"assistant", "content": "..."}]
         """
-        if not settings.GEMINI_API_KEY and not settings.GROQ_API_KEY:
-            return "Please configure your GEMINI_API_KEY or GROQ_API_KEY in the environment settings to use the voice agent."
+        if not self.api_key:
+            return f"Please configure your {self.provider.upper()}_API_KEY in the environment settings or enter it in the web interface."
 
         try:
             if self.provider == "gemini":

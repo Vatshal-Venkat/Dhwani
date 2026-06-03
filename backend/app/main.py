@@ -67,15 +67,18 @@ async def websocket_call_endpoint(websocket: WebSocket):
             if msg_type == "start_call":
                 system_prompt = message.get("systemPrompt", system_prompt)
                 voice = message.get("voice", voice)
-                provider = message.get("provider")
-                model = message.get("model")
+                provider = message.get("provider") or settings.LLM_PROVIDER
+                model = message.get("model") or settings.LLM_MODEL
+                gemini_key = message.get("geminiKey")
+                groq_key = message.get("groqKey")
                 
-                # Re-initialize LLM Service if client requested custom provider/model
-                if provider or model:
-                    llm_service = LLMService(
-                        provider=provider or settings.LLM_PROVIDER,
-                        model=model or settings.LLM_MODEL
-                    )
+                # Re-initialize LLM Service if client requested custom provider/model/keys
+                api_key = gemini_key if provider == "gemini" else groq_key
+                llm_service = LLMService(
+                    provider=provider,
+                    model=model,
+                    api_key=api_key
+                )
                 
                 greeting = message.get("greeting", "Hello! This is Alex calling. How can I help you today?")
                 logger.info(f"Starting call. Greeting: '{greeting}', Voice: {voice}")
