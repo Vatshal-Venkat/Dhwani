@@ -19,7 +19,7 @@ import {
 function App() {
   // Call configuration state
   const [provider, setProvider] = useState(() => localStorage.getItem('llm_provider') || 'gemini');
-  const [model, setModel] = useState(() => localStorage.getItem('llm_model') || 'gemini-1.5-flash');
+  const [model, setModel] = useState(() => localStorage.getItem('llm_model') || 'gemini-3.5-flash');
   const [geminiKey, setGeminiKey] = useState(() => localStorage.getItem('gemini_api_key') || '');
   const [groqKey, setGroqKey] = useState(() => localStorage.getItem('groq_api_key') || '');
   const [voice, setVoice] = useState('en-US-EmmaMultilingualNeural');
@@ -429,14 +429,14 @@ function App() {
               <label className="input-label">LLM Provider</label>
               <div className="provider-toggle-grid">
                 <button 
-                  onClick={() => { setProvider('gemini'); setModel('gemini-1.5-flash'); }}
+                  onClick={() => { setProvider('gemini'); setModel('gemini-3.5-flash'); }}
                   className={`btn-toggle ${provider === 'gemini' ? 'active' : ''}`}
                   disabled={callActive}
                 >
                   Google Gemini
                 </button>
                 <button 
-                  onClick={() => { setProvider('groq'); setModel('llama3-8b-8192'); }}
+                  onClick={() => { setProvider('groq'); setModel('llama-3.1-8b-instant'); }}
                   className={`btn-toggle ${provider === 'groq' ? 'active' : ''}`}
                   disabled={callActive}
                 >

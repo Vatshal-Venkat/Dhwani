@@ -39,7 +39,7 @@ class LLMService:
             if self.provider == "gemini":
                 # Convert standard chat history to Gemini structure
                 # System prompt is passed to generation config or system_instruction
-                model_name = self.model if "gemini" in self.model else "gemini-1.5-flash"
+                model_name = self.model if "gemini" in self.model else "gemini-3.5-flash"
                 
                 # Format history for Gemini
                 contents = []
