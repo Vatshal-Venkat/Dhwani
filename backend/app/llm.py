@@ -1,4 +1,5 @@
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from groq import Groq
 from app.config import settings
 import logging
@@ -19,7 +20,7 @@ class LLMService:
                 self.api_key = settings.GEMINI_API_KEY
             if not self.api_key:
                 logger.warning("GEMINI_API_KEY is not set.")
-            genai.configure(api_key=self.api_key)
+            self.gemini_client = genai.Client(api_key=self.api_key)
         elif self.provider == "groq":
             if not self.api_key:
                 self.api_key = settings.GROQ_API_KEY
@@ -45,15 +46,21 @@ class LLMService:
                 contents = []
                 for h in history:
                     role = "user" if h["role"] == "user" else "model"
-                    contents.append({"role": role, "parts": [h["content"]]})
+                    contents.append(
+                        types.Content(
+                            role=role,
+                            parts=[types.Part.from_text(text=h["content"])]
+                        )
+                    )
                 
-                model = genai.GenerativeModel(
-                    model_name=model_name,
-                    system_instruction=system_prompt
+                # Generate content using the new SDK
+                response = self.gemini_client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt
+                    )
                 )
-                
-                # Using run_in_executor or call directly since generativeai is synchronous
-                response = model.generate_content(contents)
                 return response.text
                 
             elif self.provider == "groq":
