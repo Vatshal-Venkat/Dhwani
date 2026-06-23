@@ -46,10 +46,13 @@ function App() {
   const recognitionRef = useRef(null);
   const audioRef = useRef(null);
   const callTimerRef = useRef(null);
+  const vadRef = useRef(null);
   
   // Refs to avoid state capture in async event handlers
   const callActiveRef = useRef(false);
   const isSpeakingRef = useRef(false);
+  const currentAgentTextRef = useRef('');
+  const userSpokeVADRef = useRef(false);
 
   useEffect(() => {
     callActiveRef.current = callActive;
@@ -126,11 +129,18 @@ function App() {
     recognition.onstart = () => {
       if (callActiveRef.current && !isSpeakingRef.current) {
         setStatus('listening');
-        setInterimSpeech('');
       }
+      setInterimSpeech('');
     };
 
     recognition.onresult = (event) => {
+      // If the agent is speaking and VAD hasn't detected user speech, ignore the result!
+      // This protects against speaker echo when headphones are not used.
+      if (isSpeakingRef.current && !userSpokeVADRef.current) {
+        console.log("Speech Recognition: Ignored possible agent echo");
+        return;
+      }
+
       let interimTranscript = '';
       let finalTranscript = '';
       
@@ -149,6 +159,9 @@ function App() {
       if (finalTranscript && finalTranscript.trim()) {
         setInterimSpeech('');
         addTranscript('user', finalTranscript);
+        
+        // Reset the VAD user spoke ref since a turn is completed
+        userSpokeVADRef.current = false;
         
         // Send user transcript to WebSocket backend
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -184,8 +197,8 @@ function App() {
     };
 
     recognition.onend = () => {
-      // Loop recognition if call is active and agent is NOT speaking
-      if (callActiveRef.current && !isSpeakingRef.current) {
+      // Loop recognition continuously if call is active (even when agent speaks)
+      if (callActiveRef.current) {
         try {
           recognition.start();
         } catch (e) {
@@ -214,6 +227,8 @@ function App() {
     }
 
     isSpeakingRef.current = true;
+    currentAgentTextRef.current = text;
+    userSpokeVADRef.current = false;
     setStatus('speaking');
     
     // Create new HTML5 Audio from base64
@@ -221,55 +236,76 @@ function App() {
     const audio = new Audio(audioUrl);
     audioRef.current = audio;
 
-    // Turn off recognition during agent speech to avoid feedback
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch (e) {
-        console.log("Recognition stop error:", e);
-      }
-    }
-
     audio.onplay = () => {
       addTranscript('agent', text);
     };
 
     audio.onended = () => {
       isSpeakingRef.current = false;
+      currentAgentTextRef.current = '';
       
-      // Turn back on Speech Recognition
-      if (callActiveRef.current && recognitionRef.current) {
+      // Turn back on Speech Recognition UI state
+      if (callActiveRef.current) {
         setStatus('listening');
-        try {
-          recognitionRef.current.start();
-        } catch (e) {
-          console.error("Error starting Speech Recognition after playback:", e);
-        }
       }
     };
 
     audio.onerror = (e) => {
       console.error("Audio playback error:", e);
       isSpeakingRef.current = false;
-      if (callActiveRef.current && recognitionRef.current) {
+      currentAgentTextRef.current = '';
+      if (callActiveRef.current) {
         setStatus('listening');
-        try {
-          recognitionRef.current.start();
-        } catch (err) {
-          console.error(err);
-        }
       }
     };
 
     audio.play().catch(e => {
       console.error("Failed to play audio:", e);
       isSpeakingRef.current = false;
-      // Auto-recover turn
-      if (callActiveRef.current && recognitionRef.current) {
+      currentAgentTextRef.current = '';
+      if (callActiveRef.current) {
         setStatus('listening');
-        try { recognitionRef.current.start(); } catch (err) {}
       }
     });
+  };
+
+  // Handle Barge-in interruption
+  const handleBargeIn = () => {
+    if (!callActiveRef.current || !isSpeakingRef.current) return;
+
+    console.log("Barge-in detected: interrupting agent playback...");
+
+    // Estimate text spoken so far based on current playback ratio
+    let textSpoken = "";
+    if (audioRef.current && currentAgentTextRef.current) {
+      const duration = audioRef.current.duration;
+      const currentTime = audioRef.current.currentTime;
+      if (duration > 0 && currentTime > 0) {
+        const ratio = currentTime / duration;
+        const words = currentAgentTextRef.current.split(" ");
+        const wordsSpokenCount = Math.ceil(words.length * ratio);
+        textSpoken = words.slice(0, wordsSpokenCount).join(" ");
+      }
+    }
+
+    // Stop playback immediately
+    if (audioRef.current) {
+      try {
+        audioRef.current.pause();
+      } catch (e) {
+        console.error("Error pausing audio on barge-in:", e);
+      }
+    }
+    isSpeakingRef.current = false;
+    setStatus('listening');
+
+    // Notify backend of interruption
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'interrupted',
+        text_spoken: textSpoken
+      }));
+    }
   };
 
   // Start the call
@@ -279,6 +315,7 @@ function App() {
     setStatus('dialing');
     setCallActive(true);
     isSpeakingRef.current = false;
+    userSpokeVADRef.current = false;
 
     // Check browser support for Speech API
     const recognition = initializeSpeechRecognition();
@@ -289,6 +326,31 @@ function App() {
       return;
     }
     recognitionRef.current = recognition;
+
+    // Initialize Silero VAD
+    if (window.vad) {
+      window.vad.MicVAD.new({
+        onSpeechStart: () => {
+          console.log("VAD: user speech started");
+          userSpokeVADRef.current = true;
+          if (callActiveRef.current && isSpeakingRef.current) {
+            handleBargeIn();
+          }
+        },
+        onSpeechEnd: (audio) => {
+          console.log("VAD: user speech ended");
+        }
+      })
+      .then((myvad) => {
+        vadRef.current = myvad;
+        myvad.start();
+      })
+      .catch((err) => {
+        console.error("VAD initialization failed", err);
+      });
+    } else {
+      console.warn("VAD script not found in window context");
+    }
 
     // Connect to WebSocket Server
     const wsUrl = `ws://localhost:8000/ws/call`;
@@ -363,6 +425,17 @@ function App() {
         wsRef.current.close();
       } catch (e) {}
     }
+
+    // Destroy VAD instance
+    if (vadRef.current) {
+      try {
+        vadRef.current.destroy();
+      } catch (e) {
+        console.error("Error destroying VAD:", e);
+      }
+      vadRef.current = null;
+    }
+    userSpokeVADRef.current = false;
 
     // Stop audio playback
     if (audioRef.current) {

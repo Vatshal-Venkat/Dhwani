@@ -149,6 +149,16 @@ async def websocket_call_endpoint(websocket: WebSocket):
                         "audio": "" # Send text only if TTS fails
                     })
                     
+            elif msg_type == "interrupted":
+                logger.info("Agent was interrupted by user speech (barge-in)")
+                if conversation_history and conversation_history[-1]["role"] == "assistant":
+                    text_spoken = message.get("text_spoken", "").strip()
+                    if text_spoken:
+                        conversation_history[-1]["content"] = text_spoken + "..."
+                        logger.info(f"Updated assistant history history turn: '{text_spoken}...'")
+                    else:
+                        conversation_history[-1]["content"] = "..."
+                        
             elif msg_type == "hang_up":
                 logger.info("Client hung up call session")
                 await websocket.send_json({
