@@ -329,7 +329,7 @@ function App() {
     if (window.vad) {
       window.vad.MicVAD.new({
         baseAssetPath: "https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.30/dist/",
-        onnxWASMBasePath: "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.0/dist/",
+        onnxWASMBasePath: "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/",
         ortConfig: (ort) => {
           // Disable WASM threads to bypass secure context (SharedArrayBuffer) requirements on localhost
           ort.env.wasm.numThreads = 1;
