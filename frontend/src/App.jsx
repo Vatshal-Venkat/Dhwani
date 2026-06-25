@@ -326,6 +326,14 @@ function App() {
       return;
     }
     recognitionRef.current = recognition;
+    
+    // Start speech recognition initially to request permissions and begin listening
+    try {
+      recognition.start();
+      console.log("Speech Recognition started initially");
+    } catch (e) {
+      console.error("Failed to start Speech Recognition initially:", e);
+    }
 
     // Initialize Silero VAD
     if (window.vad) {
