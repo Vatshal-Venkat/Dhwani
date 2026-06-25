@@ -1,16 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Phone, 
-  PhoneOff, 
-  Mic, 
-  Volume2, 
-  Settings as SettingsIcon, 
-  VolumeX, 
-  RefreshCw, 
-  Play, 
-  Database, 
-  Key, 
-  MessageSquare, 
+import {
+  Phone,
+  PhoneOff,
+  Mic,
+  Volume2,
+  Settings as SettingsIcon,
+  VolumeX,
+  RefreshCw,
+  Play,
+  Database,
+  Key,
+  MessageSquare,
   Activity
 } from 'lucide-react';
 
@@ -22,7 +22,7 @@ function App() {
   const [groqKey, setGroqKey] = useState(() => localStorage.getItem('groq_api_key') || '');
   const [voice, setVoice] = useState('en-US-EmmaMultilingualNeural');
   const [voices, setVoices] = useState([]);
-  
+
   const [systemPrompt, setSystemPrompt] = useState(
     "You are Alex, a helpful outbound representative from 'SmartHome Solutions'. " +
     "Your goal is to call the customer to confirm their scheduled installation appointment tomorrow at 10:00 AM. " +
@@ -38,14 +38,14 @@ function App() {
   const [transcripts, setTranscripts] = useState([]);
   const [errorMessage, setErrorMessage] = useState('');
   const [interimSpeech, setInterimSpeech] = useState('');
-  
+
   // WebSockets and Audio References
   const wsRef = useRef(null);
   const recognitionRef = useRef(null);
   const audioRef = useRef(null);
   const callTimerRef = useRef(null);
   const vadRef = useRef(null);
-  
+
   // Refs to avoid state capture in async event handlers
   const callActiveRef = useRef(false);
   const isSpeakingRef = useRef(false);
@@ -141,7 +141,7 @@ function App() {
 
       let interimTranscript = '';
       let finalTranscript = '';
-      
+
       for (let i = event.resultIndex; i < event.results.length; ++i) {
         if (event.results[i].isFinal) {
           finalTranscript += event.results[i][0].transcript;
@@ -149,18 +149,18 @@ function App() {
           interimTranscript += event.results[i][0].transcript;
         }
       }
-      
+
       if (interimTranscript) {
         setInterimSpeech(interimTranscript);
       }
-      
+
       if (finalTranscript && finalTranscript.trim()) {
         setInterimSpeech('');
         addTranscript('user', finalTranscript);
-        
+
         // Reset the VAD user spoke ref since a turn is completed
         userSpokeVADRef.current = false;
-        
+
         // Send user transcript to WebSocket backend
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
           setStatus('thinking');
@@ -177,19 +177,19 @@ function App() {
         // Ignore silent periods
         return;
       }
-      
+
       console.error("Speech Recognition Error:", event.error);
-      
+
       let friendlyMessage = `Speech Recognition Error: ${event.error}`;
       if (event.error === 'not-allowed') {
         friendlyMessage = "Microphone access denied. Please enable microphone permissions in your browser settings.";
       } else if (event.error === 'audio-capture') {
         friendlyMessage = "No microphone detected. Please connect a microphone and try again.";
       }
-      
+
       setErrorMessage(friendlyMessage);
       setStatus('error');
-      
+
       // Clean up connection and stop loop
       handleHangUp();
     };
@@ -228,7 +228,7 @@ function App() {
     currentAgentTextRef.current = text;
     userSpokeVADRef.current = false;
     setStatus('speaking');
-    
+
     // Create new HTML5 Audio from base64
     const audioUrl = `data:audio/mp3;base64,${audioBase64}`;
     const audio = new Audio(audioUrl);
@@ -241,7 +241,7 @@ function App() {
     audio.onended = () => {
       isSpeakingRef.current = false;
       currentAgentTextRef.current = '';
-      
+
       // Turn back on Speech Recognition UI state
       if (callActiveRef.current) {
         setStatus('listening');
@@ -324,7 +324,7 @@ function App() {
       return;
     }
     recognitionRef.current = recognition;
-    
+
     // Initialize Silero VAD with explicit CDN paths and Single-Threaded ONNX Runtime
     if (window.vad) {
       window.vad.MicVAD.new({
@@ -345,39 +345,39 @@ function App() {
           console.log("VAD: user speech ended");
         }
       })
-      .then((myvad) => {
-        console.log("VAD initialized successfully");
-        vadRef.current = myvad;
-        myvad.start();
+        .then((myvad) => {
+          console.log("VAD initialized successfully");
+          vadRef.current = myvad;
+          myvad.start();
 
-        // Start speech recognition ONLY after VAD has successfully claimed the mic
-        if (recognitionRef.current) {
-          try {
-            recognitionRef.current.start();
-            console.log("Speech Recognition started after VAD initialization");
-          } catch (e) {
-            console.error("Failed to start Speech Recognition after VAD:", e);
+          // Start speech recognition ONLY after VAD has successfully claimed the mic
+          if (recognitionRef.current) {
+            try {
+              recognitionRef.current.start();
+              console.log("Speech Recognition started after VAD initialization");
+            } catch (e) {
+              console.error("Failed to start Speech Recognition after VAD:", e);
+            }
           }
-        }
-      })
-      .catch((err) => {
-        console.error("VAD initialization failed:", err);
-        setErrorMessage(`VAD failed to initialize: ${err.message || err}. Starting fallback speech recognition.`);
-        
-        // Fallback: Start speech recognition anyway
-        if (recognitionRef.current) {
-          try {
-            recognitionRef.current.start();
-            console.log("Speech Recognition started as fallback (VAD failed)");
-          } catch (e) {
-            console.error("Failed to start Speech Recognition in fallback:", e);
+        })
+        .catch((err) => {
+          console.error("VAD initialization failed:", err);
+          setErrorMessage(`VAD failed to initialize: ${err.message || err}. Starting fallback speech recognition.`);
+
+          // Fallback: Start speech recognition anyway
+          if (recognitionRef.current) {
+            try {
+              recognitionRef.current.start();
+              console.log("Speech Recognition started as fallback (VAD failed)");
+            } catch (e) {
+              console.error("Failed to start Speech Recognition in fallback:", e);
+            }
           }
-        }
-      });
+        });
     } else {
       console.warn("VAD script not found in window context");
       setErrorMessage("VAD script not loaded. Starting fallback speech recognition.");
-      
+
       // Fallback: Start speech recognition anyway
       if (recognitionRef.current) {
         try {
@@ -397,7 +397,7 @@ function App() {
     socket.onopen = () => {
       setStatus('connected');
       addTranscript('system', 'Call connected. Agent is initiating greeting...');
-      
+
       // Send configurations
       socket.send(JSON.stringify({
         type: 'start_call',
@@ -414,7 +414,7 @@ function App() {
 
     socket.onmessage = (event) => {
       const data = JSON.parse(event.data);
-      
+
       if (data.type === 'call_started' || data.type === 'agent_speech') {
         if (data.audio) {
           playAgentAudio(data.audio, data.text);
@@ -423,7 +423,7 @@ function App() {
           addTranscript('agent', data.text);
           setStatus('listening');
           if (recognitionRef.current) {
-            try { recognitionRef.current.start(); } catch (e) {}
+            try { recognitionRef.current.start(); } catch (e) { }
           }
         }
       } else if (data.type === 'status') {
@@ -460,7 +460,7 @@ function App() {
       try {
         wsRef.current.send(JSON.stringify({ type: 'hang_up' }));
         wsRef.current.close();
-      } catch (e) {}
+      } catch (e) { }
     }
 
     // Destroy VAD instance
@@ -485,7 +485,7 @@ function App() {
       try {
         recognitionRef.current.onend = null; // Prevent looping restart
         recognitionRef.current.stop();
-      } catch (e) {}
+      } catch (e) { }
       recognitionRef.current = null;
     }
 
@@ -525,7 +525,7 @@ function App() {
 
       {/* Main Grid */}
       <div className="dashboard-grid">
-        
+
         {/* Left Column: Call Config Panel */}
         <section className="glass-panel">
           <div className="panel-header">
@@ -538,14 +538,14 @@ function App() {
             <div className="input-group">
               <label className="input-label">LLM Provider</label>
               <div className="provider-toggle-grid">
-                <button 
+                <button
                   onClick={() => { setProvider('gemini'); setModel('gemini-3.5-flash'); }}
                   className={`btn-toggle ${provider === 'gemini' ? 'active' : ''}`}
                   disabled={callActive}
                 >
                   Google Gemini
                 </button>
-                <button 
+                <button
                   onClick={() => { setProvider('groq'); setModel('llama-3.1-8b-instant'); }}
                   className={`btn-toggle ${provider === 'groq' ? 'active' : ''}`}
                   disabled={callActive}
@@ -560,7 +560,7 @@ function App() {
               <label className="input-label">API Credentials</label>
               <div className="input-with-icon">
                 <Key className="input-icon" />
-                <input 
+                <input
                   type="password"
                   placeholder={provider === 'gemini' ? "Enter Gemini API Key..." : "Enter Groq API Key..."}
                   value={provider === 'gemini' ? geminiKey : groqKey}
@@ -595,7 +595,7 @@ function App() {
             {/* Greeting */}
             <div className="input-group">
               <label className="input-label">Opening Greeting Line</label>
-              <input 
+              <input
                 type="text"
                 value={greeting}
                 onChange={(e) => setGreeting(e.target.value)}
@@ -607,7 +607,7 @@ function App() {
             {/* Prompt Config */}
             <div className="input-group">
               <label className="input-label">Agent Persona & Prompt</label>
-              <textarea 
+              <textarea
                 rows="4"
                 value={systemPrompt}
                 onChange={(e) => setSystemPrompt(e.target.value)}
@@ -655,7 +655,7 @@ function App() {
                   {formatTime(callDuration)}
                 </div>
                 <div className="call-status-label">
-                  STATUS: 
+                  STATUS:
                   <span className={`status-badge-inline ${status}`}>
                     {status}
                   </span>
@@ -681,7 +681,7 @@ function App() {
           {/* Call Control Button */}
           <div className="call-controls">
             {callActive ? (
-              <button 
+              <button
                 onClick={handleHangUp}
                 className="btn-call-action hangup"
               >
@@ -689,7 +689,7 @@ function App() {
                 Hang Up Call
               </button>
             ) : (
-              <button 
+              <button
                 onClick={handleStartCall}
                 className="btn-call-action start"
               >
@@ -744,11 +744,11 @@ function App() {
                       </div>
                     );
                   }
-                  
+
                   const isAgent = log.role === 'agent';
                   return (
-                    <div 
-                      key={log.id} 
+                    <div
+                      key={log.id}
                       className={`bubble-wrapper ${isAgent ? 'agent' : 'user'}`}
                     >
                       <div className="bubble-content">
@@ -769,16 +769,16 @@ function App() {
                 {status === 'listening' ? (
                   interimSpeech ? `🎤 "${interimSpeech}"` : '🎤 Go ahead and speak now!'
                 ) :
-                 status === 'speaking' ? '🔊 Agent is currently talking. Please wait.' :
-                 status === 'thinking' ? '⚙️ Agent is thinking...' :
-                 'Preparing conversation...'}
+                  status === 'speaking' ? '🔊 Agent is currently talking. Please wait.' :
+                    status === 'thinking' ? '⚙️ Agent is thinking...' :
+                      'Preparing conversation...'}
               </div>
             )}
           </section>
 
 
         </div>
-        
+
       </div>
     </div>
   );
