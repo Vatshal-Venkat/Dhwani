@@ -14,8 +14,6 @@ import {
   Activity
 } from 'lucide-react';
 
-
-
 function App() {
   // Call configuration state
   const [provider, setProvider] = useState(() => localStorage.getItem('llm_provider') || 'gemini');
@@ -327,17 +325,15 @@ function App() {
     }
     recognitionRef.current = recognition;
     
-    // Start speech recognition initially to request permissions and begin listening
-    try {
-      recognition.start();
-      console.log("Speech Recognition started initially");
-    } catch (e) {
-      console.error("Failed to start Speech Recognition initially:", e);
-    }
-
-    // Initialize Silero VAD
+    // Initialize Silero VAD with explicit CDN paths and Single-Threaded ONNX Runtime
     if (window.vad) {
       window.vad.MicVAD.new({
+        baseAssetPath: "https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.30/dist/",
+        onnxWASMBasePath: "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/",
+        ortConfig: (ort) => {
+          // Disable WASM threads to bypass secure context (SharedArrayBuffer) requirements on localhost
+          ort.env.wasm.numThreads = 1;
+        },
         onSpeechStart: () => {
           console.log("VAD: user speech started");
           userSpokeVADRef.current = true;
@@ -350,14 +346,47 @@ function App() {
         }
       })
       .then((myvad) => {
+        console.log("VAD initialized successfully");
         vadRef.current = myvad;
         myvad.start();
+
+        // Start speech recognition ONLY after VAD has successfully claimed the mic
+        if (recognitionRef.current) {
+          try {
+            recognitionRef.current.start();
+            console.log("Speech Recognition started after VAD initialization");
+          } catch (e) {
+            console.error("Failed to start Speech Recognition after VAD:", e);
+          }
+        }
       })
       .catch((err) => {
-        console.error("VAD initialization failed", err);
+        console.error("VAD initialization failed:", err);
+        setErrorMessage(`VAD failed to initialize: ${err.message || err}. Starting fallback speech recognition.`);
+        
+        // Fallback: Start speech recognition anyway
+        if (recognitionRef.current) {
+          try {
+            recognitionRef.current.start();
+            console.log("Speech Recognition started as fallback (VAD failed)");
+          } catch (e) {
+            console.error("Failed to start Speech Recognition in fallback:", e);
+          }
+        }
       });
     } else {
       console.warn("VAD script not found in window context");
+      setErrorMessage("VAD script not loaded. Starting fallback speech recognition.");
+      
+      // Fallback: Start speech recognition anyway
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.start();
+          console.log("Speech Recognition started (No VAD script)");
+        } catch (e) {
+          console.error("Failed to start Speech Recognition (No VAD script):", e);
+        }
+      }
     }
 
     // Connect to WebSocket Server
