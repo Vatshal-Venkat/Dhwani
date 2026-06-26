@@ -325,14 +325,16 @@ function App() {
     }
     recognitionRef.current = recognition;
 
-    // Initialize Silero VAD with explicit CDN paths and Single-Threaded ONNX Runtime
+    // Initialize Silero VAD with local assets and Single-Threaded ONNX Runtime
     if (window.vad) {
       window.vad.MicVAD.new({
-        baseAssetPath: "https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.30/dist/",
-        onnxWASMBasePath: "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.0/dist/",
+        baseAssetPath: "/",
+        modelURL: "/silero_vad_v5.onnx",
         ortConfig: (ort) => {
           // Disable WASM threads to bypass secure context (SharedArrayBuffer) requirements on localhost
           ort.env.wasm.numThreads = 1;
+          // Point to local WASM files in the public directory
+          ort.env.wasm.wasmPaths = "/";
         },
         onSpeechStart: () => {
           console.log("VAD: user speech started");
