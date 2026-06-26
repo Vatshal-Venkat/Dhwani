@@ -45,6 +45,8 @@ function App() {
   const audioRef = useRef(null);
   const callTimerRef = useRef(null);
   const vadRef = useRef(null);
+  const micStreamRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
 
   // Refs to avoid state capture in async event handlers
   const callActiveRef = useRef(false);
@@ -315,15 +317,36 @@ function App() {
     isSpeakingRef.current = false;
     userSpokeVADRef.current = false;
 
-    // Check browser support for Speech API
-    const recognition = initializeSpeechRecognition();
-    if (!recognition) {
-      setErrorMessage("Speech Recognition API not supported in this browser. Please use Google Chrome or Microsoft Edge.");
-      setStatus('error');
-      setCallActive(false);
-      return;
-    }
-    recognitionRef.current = recognition;
+    // Set up microphone capture and MediaRecorder for streaming
+    navigator.mediaDevices.getUserMedia({ audio: true })
+      .then((stream) => {
+        micStreamRef.current = stream;
+        
+        let options = { mimeType: 'audio/webm;codecs=opus' };
+        if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+          options = { mimeType: 'audio/webm' };
+        }
+        if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+          options = { mimeType: 'audio/ogg;codecs=opus' };
+        }
+        if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+          options = { mimeType: '' }; // default browser format
+        }
+
+        const recorder = new MediaRecorder(stream, options);
+        mediaRecorderRef.current = recorder;
+
+        recorder.ondataavailable = (event) => {
+          if (event.data.size > 0 && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            event.data.arrayBuffer().then((buffer) => {
+              wsRef.current.send(buffer);
+            });
+          }
+        };
+      })
+      .catch((err) => {
+        console.error("Microphone access denied or failed for MediaRecorder:", err);
+      });
 
     // Initialize Silero VAD with local assets and Single-Threaded ONNX Runtime
     if (window.vad) {
@@ -339,56 +362,56 @@ function App() {
         onSpeechStart: () => {
           console.log("VAD: user speech started");
           userSpokeVADRef.current = true;
-          if (callActiveRef.current && isSpeakingRef.current) {
-            handleBargeIn();
+          if (callActiveRef.current) {
+            if (isSpeakingRef.current) {
+              handleBargeIn();
+            }
+            // Notify backend speech started
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({ type: 'speech_start' }));
+            }
+            // Start recording
+            if (mediaRecorderRef.current && mediaRecorderRef.current.state === "inactive") {
+              try {
+                mediaRecorderRef.current.start(100);
+                console.log("MediaRecorder started");
+              } catch (e) {
+                console.error("Error starting MediaRecorder:", e);
+              }
+            }
           }
         },
         onSpeechEnd: (audio) => {
           console.log("VAD: user speech ended");
+          if (callActiveRef.current) {
+            // Stop recording
+            if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+              try {
+                mediaRecorderRef.current.stop();
+                console.log("MediaRecorder stopped");
+              } catch (e) {
+                console.error("Error stopping MediaRecorder:", e);
+              }
+            }
+            // Notify backend speech ended
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({ type: 'speech_end' }));
+            }
+          }
         }
       })
         .then((myvad) => {
           console.log("VAD initialized successfully");
           vadRef.current = myvad;
           myvad.start();
-
-          // Start speech recognition ONLY after VAD has successfully claimed the mic
-          if (recognitionRef.current) {
-            try {
-              recognitionRef.current.start();
-              console.log("Speech Recognition started after VAD initialization");
-            } catch (e) {
-              console.error("Failed to start Speech Recognition after VAD:", e);
-            }
-          }
         })
         .catch((err) => {
           console.error("VAD initialization failed:", err);
-          setErrorMessage(`VAD failed to initialize: ${err.message || err}. Starting fallback speech recognition.`);
-
-          // Fallback: Start speech recognition anyway
-          if (recognitionRef.current) {
-            try {
-              recognitionRef.current.start();
-              console.log("Speech Recognition started as fallback (VAD failed)");
-            } catch (e) {
-              console.error("Failed to start Speech Recognition in fallback:", e);
-            }
-          }
+          setErrorMessage(`VAD failed to initialize: ${err.message || err}.`);
         });
     } else {
       console.warn("VAD script not found in window context");
-      setErrorMessage("VAD script not loaded. Starting fallback speech recognition.");
-
-      // Fallback: Start speech recognition anyway
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.start();
-          console.log("Speech Recognition started (No VAD script)");
-        } catch (e) {
-          console.error("Failed to start Speech Recognition (No VAD script):", e);
-        }
-      }
+      setErrorMessage("VAD script not loaded.");
     }
 
     // Connect to WebSocket Server
@@ -424,10 +447,9 @@ function App() {
           // Fallback if voice couldn't be generated
           addTranscript('agent', data.text);
           setStatus('listening');
-          if (recognitionRef.current) {
-            try { recognitionRef.current.start(); } catch (e) { }
-          }
         }
+      } else if (data.type === 'user_speech_transcript') {
+        addTranscript('user', data.text);
       } else if (data.type === 'status') {
         if (data.status === 'thinking') {
           setStatus('thinking');
@@ -463,6 +485,24 @@ function App() {
         wsRef.current.send(JSON.stringify({ type: 'hang_up' }));
         wsRef.current.close();
       } catch (e) { }
+    }
+
+    // Stop MediaRecorder
+    if (mediaRecorderRef.current) {
+      try {
+        if (mediaRecorderRef.current.state !== "inactive") {
+          mediaRecorderRef.current.stop();
+        }
+      } catch (e) { }
+      mediaRecorderRef.current = null;
+    }
+
+    // Stop mic stream tracks
+    if (micStreamRef.current) {
+      try {
+        micStreamRef.current.getTracks().forEach(track => track.stop());
+      } catch (e) { }
+      micStreamRef.current = null;
     }
 
     // Destroy VAD instance
