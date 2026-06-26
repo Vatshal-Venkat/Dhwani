@@ -118,37 +118,33 @@ async def websocket_call_endpoint(websocket: WebSocket):
                     "status": "thinking"
                 })
                 
-                # 1. Get response from LLM
-                response_text = await llm_service.get_response(conversation_history, system_prompt)
-                logger.info(f"LLM Response: '{response_text}'")
-                
-                # Update history
-                conversation_history.append({"role": "assistant", "content": response_text})
-                
-                # 2. Synthesize agent response to TTS
-                await websocket.send_json({
-                    "type": "status",
-                    "status": "speaking"
-                })
-                
                 try:
+                    # Query the configured LLM for a text response
+                    response_text = await llm_service.get_response(conversation_history, system_prompt)
+                    logger.info(f"Generated LLM Response: '{response_text}'")
+                    
+                    # Synthesize response text into speech audio
                     audio_bytes = await tts_service.generate_speech(response_text, voice)
                     audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
                     
-                    # 3. Send text and audio back to frontend
+                    # Update conversation history with assistant's turn
+                    conversation_history.append({"role": "assistant", "content": response_text})
+                    
+                    # Send response back to the client
                     await websocket.send_json({
                         "type": "agent_speech",
                         "text": response_text,
                         "audio": audio_base64
                     })
-                except Exception as tts_err:
-                    logger.error(f"Failed to generate response TTS: {tts_err}")
+                except Exception as err:
+                    logger.error(f"Error generating LLM/TTS response: {err}")
                     await websocket.send_json({
-                        "type": "agent_speech",
-                        "text": response_text,
-                        "audio": "" # Send text only if TTS fails
+                        "type": "status",
+                        "status": "error",
+                        "message": f"Error generating response: {str(err)}"
                     })
-                    
+                
+
             elif msg_type == "interrupted":
                 logger.info("Agent was interrupted by user speech (barge-in)")
                 if conversation_history and conversation_history[-1]["role"] == "assistant":

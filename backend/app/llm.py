@@ -81,3 +81,97 @@ class LLMService:
         except Exception as e:
             logger.error(f"Error calling LLM provider {self.provider}: {e}")
             return f"Error: Could not retrieve response from {self.provider}. Details: {str(e)}"
+
+    async def get_response_stream(self, history: list, system_prompt: str):
+        """
+        Generates LLM completion as an async generator yielding complete sentences.
+        """
+        if not self.api_key:
+            yield f"Please configure your {self.provider.upper()}_API_KEY."
+            return
+
+        try:
+            sentence_buffer = ""
+            sentence_endings = {'.', '!', '?'}
+
+            if self.provider == "gemini":
+                model_name = self.model if "gemini" in self.model else "gemini-3.5-flash"
+                contents = []
+                for h in history:
+                    role = "user" if h["role"] == "user" else "model"
+                    contents.append(
+                        types.Content(
+                            role=role,
+                            parts=[types.Part.from_text(text=h["content"])]
+                        )
+                    )
+                
+                # Using the google-genai generate_content_stream
+                response_stream = self.gemini_client.models.generate_content_stream(
+                    model=model_name,
+                    contents=contents,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt
+                    )
+                )
+
+                for chunk in response_stream:
+                    if chunk.text:
+                        sentence_buffer += chunk.text
+                        while True:
+                            first_ending_idx = -1
+                            for i, char in enumerate(sentence_buffer):
+                                if char in sentence_endings:
+                                    if i + 1 == len(sentence_buffer) or sentence_buffer[i + 1].isspace():
+                                        first_ending_idx = i
+                                        break
+                            if first_ending_idx != -1:
+                                sentence = sentence_buffer[:first_ending_idx + 1].strip()
+                                sentence_buffer = sentence_buffer[first_ending_idx + 1:]
+                                if sentence:
+                                    yield sentence
+                            else:
+                                break
+
+            elif self.provider == "groq":
+                messages = [{"role": "system", "content": system_prompt}]
+                for h in history:
+                    messages.append({"role": h["role"], "content": h["content"]})
+
+                completion_stream = self.groq_client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=0.7,
+                    max_tokens=150,
+                    stream=True
+                )
+
+                for chunk in completion_stream:
+                    if chunk.choices[0].delta.content:
+                        sentence_buffer += chunk.choices[0].delta.content
+                        while True:
+                            first_ending_idx = -1
+                            for i, char in enumerate(sentence_buffer):
+                                if char in sentence_endings:
+                                    if i + 1 == len(sentence_buffer) or sentence_buffer[i + 1].isspace():
+                                        first_ending_idx = i
+                                        break
+                            if first_ending_idx != -1:
+                                sentence = sentence_buffer[:first_ending_idx + 1].strip()
+                                sentence_buffer = sentence_buffer[first_ending_idx + 1:]
+                                if sentence:
+                                    yield sentence
+                            else:
+                                break
+
+            else:
+                yield f"Unsupported LLM provider: {self.provider}"
+
+            # Yield any remaining text
+            remaining = sentence_buffer.strip()
+            if remaining:
+                yield remaining
+
+        except Exception as e:
+            logger.error(f"Error streaming from {self.provider}: {e}")
+            yield f"Error: Could not retrieve response from {self.provider}."
