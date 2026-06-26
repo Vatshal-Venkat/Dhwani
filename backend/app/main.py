@@ -13,7 +13,20 @@ from app.tts import TTSService
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("voice-agent")
 
-app = FastAPI(title="Outbound Voice Agent API")
+from contextlib import asynccontextmanager
+from app.database import init_db
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Initializing database and tables...")
+    try:
+        await init_db()
+        logger.info("Database initialization completed successfully.")
+    except Exception as e:
+        logger.error(f"Error during database initialization: {e}")
+    yield
+
+app = FastAPI(title="Outbound Voice Agent API", lifespan=lifespan)
 
 # Enable CORS for frontend integration
 app.add_middleware(
