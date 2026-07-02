@@ -18,3 +18,8 @@ async def init_db():
         # Import models here to register them with Base.metadata before creation
         from app.models import Agent, Call, APIKey
         await conn.run_sync(Base.metadata.create_all)
+
+async def get_db():
+    async with AsyncSessionLocal() as session:
+        yield session
+
