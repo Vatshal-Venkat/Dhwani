@@ -65,7 +65,6 @@ async def get_config():
 async def get_voices():
     return TTSService.get_available_voices()
 
-
 class AgentCreate(BaseModel):
     name: str
     voice_id: str
@@ -96,7 +95,6 @@ class CallResponse(BaseModel):
 
     class Config:
         from_attributes = True
-
 
 @app.get("/api/agents", response_model=List[AgentResponse])
 async def list_agents(db: AsyncSession = Depends(get_db)):
