@@ -11,7 +11,12 @@ import {
   Database,
   Key,
   MessageSquare,
-  Activity
+  Activity,
+  Trash2,
+  Edit3,
+  Plus,
+  Calendar,
+  Clock
 } from 'lucide-react';
 
 function App() {
@@ -30,6 +35,23 @@ function App() {
   );
   const [greeting, setGreeting] = useState("Hi there! This is Alex calling from SmartHome Solutions. Am I speaking with the homeowner?");
 
+  // Navigation and Database Tab States
+  const [activeTab, setActiveTab] = useState('simulator'); // 'simulator' | 'agents' | 'history'
+  const [agents, setAgents] = useState([]);
+  const [selectedAgentId, setSelectedAgentId] = useState('custom');
+  
+  // Create / Edit Agent Form States
+  const [formName, setFormName] = useState('');
+  const [formVoice, setFormVoice] = useState('en-US-EmmaMultilingualNeural');
+  const [formGreeting, setFormGreeting] = useState('');
+  const [formPrompt, setFormPrompt] = useState('');
+  const [formTemp, setFormTemp] = useState(0.7);
+  const [editingAgentId, setEditingAgentId] = useState(null);
+
+  // Call history states
+  const [calls, setCalls] = useState([]);
+  const [activeHistoryCall, setActiveHistoryCall] = useState(null);
+
 
   // Call runtime state
   const [status, setStatus] = useState('idle'); // idle, dialing, connected, listening, thinking, speaking, disconnected, error
@@ -45,6 +67,8 @@ function App() {
   const audioRef = useRef(null);
   const callTimerRef = useRef(null);
   const vadRef = useRef(null);
+  const micStreamRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
 
   // Refs to avoid state capture in async event handlers
   const callActiveRef = useRef(false);
@@ -56,7 +80,31 @@ function App() {
     callActiveRef.current = callActive;
   }, [callActive]);
 
-  // Fetch available voices & default configurations from Backend
+  // Fetch available voices, configurations, agents, and calls from Backend
+  const fetchAgents = async () => {
+    try {
+      const response = await fetch('http://localhost:8000/api/agents');
+      if (response.ok) {
+        const data = await response.json();
+        setAgents(data);
+      }
+    } catch (err) {
+      console.error("Could not fetch agents", err);
+    }
+  };
+
+  const fetchCalls = async () => {
+    try {
+      const response = await fetch('http://localhost:8000/api/calls');
+      if (response.ok) {
+        const data = await response.json();
+        setCalls(data);
+      }
+    } catch (err) {
+      console.error("Could not fetch calls", err);
+    }
+  };
+
   useEffect(() => {
     const fetchConfig = async () => {
       try {
@@ -86,6 +134,8 @@ function App() {
 
     fetchConfig();
     fetchVoices();
+    fetchAgents();
+    fetchCalls();
   }, []);
 
   // Save config values to localStorage
@@ -95,6 +145,98 @@ function App() {
     localStorage.setItem('gemini_api_key', geminiKey);
     localStorage.setItem('groq_api_key', groqKey);
   }, [provider, model, geminiKey, groqKey]);
+
+  // Handle Agent selector change
+  const handleAgentSelectChange = (agentId) => {
+    setSelectedAgentId(agentId);
+    if (agentId === 'custom') {
+      return;
+    }
+    const selectedAgent = agents.find(a => a.id === parseInt(agentId));
+    if (selectedAgent) {
+      setVoice(selectedAgent.voice_id);
+      setGreeting(selectedAgent.greeting);
+      setSystemPrompt(selectedAgent.system_prompt);
+    }
+  };
+
+  // Agent CRUD form submit
+  const handleSaveAgent = async (e) => {
+    e.preventDefault();
+    if (!formName.trim() || !formPrompt.trim() || !formGreeting.trim()) {
+      alert("Please fill in all fields.");
+      return;
+    }
+
+    const payload = {
+      name: formName,
+      voice_id: formVoice,
+      temperature: parseFloat(formTemp),
+      system_prompt: formPrompt,
+      greeting: formGreeting
+    };
+
+    try {
+      const url = editingAgentId 
+        ? `http://localhost:8000/api/agents/${editingAgentId}` 
+        : 'http://localhost:8000/api/agents';
+      const method = editingAgentId ? 'PUT' : 'POST';
+
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (res.ok) {
+        await fetchAgents();
+        // Reset form
+        setFormName('');
+        setFormPrompt('');
+        setFormGreeting('');
+        setEditingAgentId(null);
+      } else {
+        console.error("Failed to save agent");
+      }
+    } catch (err) {
+      console.error("Error saving agent:", err);
+    }
+  };
+
+  const handleDeleteAgent = async (id, event) => {
+    event.stopPropagation();
+    if (!confirm("Are you sure you want to delete this agent?")) return;
+
+    try {
+      const res = await fetch(`http://localhost:8000/api/agents/${id}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        await fetchAgents();
+        if (selectedAgentId === id.toString()) {
+          setSelectedAgentId('custom');
+        }
+        if (editingAgentId === id) {
+          setEditingAgentId(null);
+          setFormName('');
+          setFormPrompt('');
+          setFormGreeting('');
+        }
+      }
+    } catch (err) {
+      console.error("Error deleting agent:", err);
+    }
+  };
+
+  const handleEditAgentClick = (agent, event) => {
+    event.stopPropagation();
+    setEditingAgentId(agent.id);
+    setFormName(agent.name);
+    setFormVoice(agent.voice_id);
+    setFormPrompt(agent.system_prompt);
+    setFormGreeting(agent.greeting);
+    setFormTemp(agent.temperature);
+  };
 
   // Handle Call Duration Timer
   useEffect(() => {
@@ -315,15 +457,36 @@ function App() {
     isSpeakingRef.current = false;
     userSpokeVADRef.current = false;
 
-    // Check browser support for Speech API
-    const recognition = initializeSpeechRecognition();
-    if (!recognition) {
-      setErrorMessage("Speech Recognition API not supported in this browser. Please use Google Chrome or Microsoft Edge.");
-      setStatus('error');
-      setCallActive(false);
-      return;
-    }
-    recognitionRef.current = recognition;
+    // Set up microphone capture and MediaRecorder for streaming
+    navigator.mediaDevices.getUserMedia({ audio: true })
+      .then((stream) => {
+        micStreamRef.current = stream;
+        
+        let options = { mimeType: 'audio/webm;codecs=opus' };
+        if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+          options = { mimeType: 'audio/webm' };
+        }
+        if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+          options = { mimeType: 'audio/ogg;codecs=opus' };
+        }
+        if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+          options = { mimeType: '' }; // default browser format
+        }
+
+        const recorder = new MediaRecorder(stream, options);
+        mediaRecorderRef.current = recorder;
+
+        recorder.ondataavailable = (event) => {
+          if (event.data.size > 0 && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+            event.data.arrayBuffer().then((buffer) => {
+              wsRef.current.send(buffer);
+            });
+          }
+        };
+      })
+      .catch((err) => {
+        console.error("Microphone access denied or failed for MediaRecorder:", err);
+      });
 
     // Initialize Silero VAD with local assets and Single-Threaded ONNX Runtime
     if (window.vad) {
@@ -339,56 +502,56 @@ function App() {
         onSpeechStart: () => {
           console.log("VAD: user speech started");
           userSpokeVADRef.current = true;
-          if (callActiveRef.current && isSpeakingRef.current) {
-            handleBargeIn();
+          if (callActiveRef.current) {
+            if (isSpeakingRef.current) {
+              handleBargeIn();
+            }
+            // Notify backend speech started
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({ type: 'speech_start' }));
+            }
+            // Start recording
+            if (mediaRecorderRef.current && mediaRecorderRef.current.state === "inactive") {
+              try {
+                mediaRecorderRef.current.start(100);
+                console.log("MediaRecorder started");
+              } catch (e) {
+                console.error("Error starting MediaRecorder:", e);
+              }
+            }
           }
         },
         onSpeechEnd: (audio) => {
           console.log("VAD: user speech ended");
+          if (callActiveRef.current) {
+            // Stop recording
+            if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+              try {
+                mediaRecorderRef.current.stop();
+                console.log("MediaRecorder stopped");
+              } catch (e) {
+                console.error("Error stopping MediaRecorder:", e);
+              }
+            }
+            // Notify backend speech ended
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({ type: 'speech_end' }));
+            }
+          }
         }
       })
         .then((myvad) => {
           console.log("VAD initialized successfully");
           vadRef.current = myvad;
           myvad.start();
-
-          // Start speech recognition ONLY after VAD has successfully claimed the mic
-          if (recognitionRef.current) {
-            try {
-              recognitionRef.current.start();
-              console.log("Speech Recognition started after VAD initialization");
-            } catch (e) {
-              console.error("Failed to start Speech Recognition after VAD:", e);
-            }
-          }
         })
         .catch((err) => {
           console.error("VAD initialization failed:", err);
-          setErrorMessage(`VAD failed to initialize: ${err.message || err}. Starting fallback speech recognition.`);
-
-          // Fallback: Start speech recognition anyway
-          if (recognitionRef.current) {
-            try {
-              recognitionRef.current.start();
-              console.log("Speech Recognition started as fallback (VAD failed)");
-            } catch (e) {
-              console.error("Failed to start Speech Recognition in fallback:", e);
-            }
-          }
+          setErrorMessage(`VAD failed to initialize: ${err.message || err}.`);
         });
     } else {
       console.warn("VAD script not found in window context");
-      setErrorMessage("VAD script not loaded. Starting fallback speech recognition.");
-
-      // Fallback: Start speech recognition anyway
-      if (recognitionRef.current) {
-        try {
-          recognitionRef.current.start();
-          console.log("Speech Recognition started (No VAD script)");
-        } catch (e) {
-          console.error("Failed to start Speech Recognition (No VAD script):", e);
-        }
-      }
+      setErrorMessage("VAD script not loaded.");
     }
 
     // Connect to WebSocket Server
@@ -408,6 +571,7 @@ function App() {
         provider,
         model,
         greeting,
+        agentId: selectedAgentId !== 'custom' ? parseInt(selectedAgentId) : undefined,
         // Send Keys if custom config used
         geminiKey: provider === 'gemini' ? geminiKey : undefined,
         groqKey: provider === 'groq' ? groqKey : undefined
@@ -424,10 +588,9 @@ function App() {
           // Fallback if voice couldn't be generated
           addTranscript('agent', data.text);
           setStatus('listening');
-          if (recognitionRef.current) {
-            try { recognitionRef.current.start(); } catch (e) { }
-          }
         }
+      } else if (data.type === 'user_speech_transcript') {
+        addTranscript('user', data.text);
       } else if (data.type === 'status') {
         if (data.status === 'thinking') {
           setStatus('thinking');
@@ -452,6 +615,7 @@ function App() {
         setStatus('disconnected');
       }
       setCallActive(false);
+      fetchCalls();
     };
   };
 
@@ -463,6 +627,24 @@ function App() {
         wsRef.current.send(JSON.stringify({ type: 'hang_up' }));
         wsRef.current.close();
       } catch (e) { }
+    }
+
+    // Stop MediaRecorder
+    if (mediaRecorderRef.current) {
+      try {
+        if (mediaRecorderRef.current.state !== "inactive") {
+          mediaRecorderRef.current.stop();
+        }
+      } catch (e) { }
+      mediaRecorderRef.current = null;
+    }
+
+    // Stop mic stream tracks
+    if (micStreamRef.current) {
+      try {
+        micStreamRef.current.getTracks().forEach(track => track.stop());
+      } catch (e) { }
+      micStreamRef.current = null;
     }
 
     // Destroy VAD instance
@@ -519,269 +701,557 @@ function App() {
             <p className="brand-subtitle">Outbound AI Voice Agent Simulation Suite</p>
           </div>
         </div>
-        <div className="connection-status">
-          <span className="connection-status-dot"></span>
-          <span>Simulator Connected</span>
+        <div className="header-tabs">
+          <button 
+            className={`tab-btn ${activeTab === 'simulator' ? 'active' : ''}`}
+            onClick={() => setActiveTab('simulator')}
+            disabled={callActive}
+          >
+            <Phone className="h-4 w-4" />
+            Simulator
+          </button>
+          <button 
+            className={`tab-btn ${activeTab === 'agents' ? 'active' : ''}`}
+            onClick={() => setActiveTab('agents')}
+            disabled={callActive}
+          >
+            <Database className="h-4 w-4" />
+            Agent Manager
+          </button>
+          <button 
+            className={`tab-btn ${activeTab === 'history' ? 'active' : ''}`}
+            onClick={() => setActiveTab('history')}
+            disabled={callActive}
+          >
+            <MessageSquare className="h-4 w-4" />
+            Call History
+          </button>
         </div>
       </header>
 
-      {/* Main Grid */}
-      <div className="dashboard-grid">
-
-        {/* Left Column: Call Config Panel */}
-        <section className="glass-panel">
-          <div className="panel-header">
-            <SettingsIcon className="panel-icon" />
-            <h2 className="panel-title">Call Configurations</h2>
-          </div>
-
-          <div className="form-content">
-            {/* Provider selection */}
-            <div className="input-group">
-              <label className="input-label">LLM Provider</label>
-              <div className="provider-toggle-grid">
-                <button
-                  onClick={() => { setProvider('gemini'); setModel('gemini-3.5-flash'); }}
-                  className={`btn-toggle ${provider === 'gemini' ? 'active' : ''}`}
-                  disabled={callActive}
-                >
-                  Google Gemini
-                </button>
-                <button
-                  onClick={() => { setProvider('groq'); setModel('llama-3.1-8b-instant'); }}
-                  className={`btn-toggle ${provider === 'groq' ? 'active' : ''}`}
-                  disabled={callActive}
-                >
-                  Groq Cloud
-                </button>
-              </div>
+      {/* Tab-based Main Grid */}
+      {activeTab === 'simulator' && (
+        <div className="dashboard-grid">
+          {/* Left Column: Call Config Panel */}
+          <section className="glass-panel">
+            <div className="panel-header">
+              <SettingsIcon className="panel-icon" />
+              <h2 className="panel-title">Call Configurations</h2>
             </div>
 
-            {/* API Credentials */}
-            <div className="input-group">
-              <label className="input-label">API Credentials</label>
-              <div className="input-with-icon">
-                <Key className="input-icon" />
-                <input
-                  type="password"
-                  placeholder={provider === 'gemini' ? "Enter Gemini API Key..." : "Enter Groq API Key..."}
-                  value={provider === 'gemini' ? geminiKey : groqKey}
-                  onChange={(e) => provider === 'gemini' ? setGeminiKey(e.target.value) : setGroqKey(e.target.value)}
+            <div className="form-content">
+              {/* Agent selector at the top */}
+              <div className="agent-select-container">
+                <label className="agent-select-label">Select Saved Agent</label>
+                <select
+                  value={selectedAgentId}
+                  onChange={(e) => handleAgentSelectChange(e.target.value)}
                   className="input-field"
                   disabled={callActive}
+                >
+                  <option value="custom">Custom Configuration</option>
+                  {agents.map(a => (
+                    <option key={a.id} value={a.id.toString()}>
+                      {a.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Provider selection */}
+              <div className="input-group">
+                <label className="input-label">LLM Provider</label>
+                <div className="provider-toggle-grid">
+                  <button
+                    onClick={() => { setProvider('gemini'); setModel('gemini-3.5-flash'); }}
+                    className={`btn-toggle ${provider === 'gemini' ? 'active' : ''}`}
+                    disabled={callActive || selectedAgentId !== 'custom'}
+                  >
+                    Google Gemini
+                  </button>
+                  <button
+                    onClick={() => { setProvider('groq'); setModel('llama-3.1-8b-instant'); }}
+                    className={`btn-toggle ${provider === 'groq' ? 'active' : ''}`}
+                    disabled={callActive || selectedAgentId !== 'custom'}
+                  >
+                    Groq Cloud
+                  </button>
+                </div>
+              </div>
+
+              {/* API Credentials */}
+              <div className="input-group">
+                <label className="input-label">API Credentials</label>
+                <div className="input-with-icon">
+                  <Key className="input-icon" />
+                  <input
+                    type="password"
+                    placeholder={provider === 'gemini' ? "Enter Gemini API Key..." : "Enter Groq API Key..."}
+                    value={provider === 'gemini' ? geminiKey : groqKey}
+                    onChange={(e) => provider === 'gemini' ? setGeminiKey(e.target.value) : setGroqKey(e.target.value)}
+                    className="input-field"
+                    disabled={callActive}
+                  />
+                </div>
+              </div>
+
+              {/* Voice Selection */}
+              <div className="input-group">
+                <label className="input-label">Agent Accent & Voice</label>
+                <select
+                  value={voice}
+                  onChange={(e) => setVoice(e.target.value)}
+                  className="input-field"
+                  disabled={callActive || selectedAgentId !== 'custom'}
+                >
+                  {voices.length > 0 ? (
+                    voices.map(v => (
+                      <option key={v.id} value={v.id} className="bg-slate-900 text-white">
+                        {v.name} ({v.gender})
+                      </option>
+                    ))
+                  ) : (
+                    <option value="en-US-EmmaMultilingualNeural">Emma (Multilingual, US)</option>
+                  )}
+                </select>
+              </div>
+
+              {/* Greeting */}
+              <div className="input-group">
+                <label className="input-label">Opening Greeting Line</label>
+                <input
+                  type="text"
+                  value={greeting}
+                  onChange={(e) => setGreeting(e.target.value)}
+                  className="input-field"
+                  disabled={callActive || selectedAgentId !== 'custom'}
+                />
+              </div>
+
+              {/* Prompt Config */}
+              <div className="input-group">
+                <label className="input-label">Agent Persona & Prompt</label>
+                <textarea
+                  rows="4"
+                  value={systemPrompt}
+                  onChange={(e) => setSystemPrompt(e.target.value)}
+                  className="input-field"
+                  placeholder="Give instructions to the agent..."
+                  disabled={callActive || selectedAgentId !== 'custom'}
                 />
               </div>
             </div>
+          </section>
 
-            {/* Voice Selection */}
-            <div className="input-group">
-              <label className="input-label">Agent Accent & Voice</label>
-              <select
-                value={voice}
-                onChange={(e) => setVoice(e.target.value)}
-                className="input-field"
-                disabled={callActive}
-              >
-                {voices.length > 0 ? (
-                  voices.map(v => (
-                    <option key={v.id} value={v.id} className="bg-slate-900 text-white">
-                      {v.name} ({v.gender})
-                    </option>
-                  ))
+          {/* Center Column: Phone UI Simulation */}
+          <section className="glass-panel simulator-panel">
+            <div className="simulator-header">
+              <span>SIMULATED CELLULAR</span>
+              <div className="call-state-indicator">
+                <span className={`call-state-dot ${callActive ? 'active' : ''}`}></span>
+                <span>{callActive ? 'IN CALL' : 'IDLE'}</span>
+              </div>
+            </div>
+
+            {/* Glowing Pulse Visualizer */}
+            <div className={`visualizer-outer state-${callActive ? status : 'idle'}`}>
+              <div className="visualizer-pulse-bg"></div>
+              <div className="visualizer-core">
+                {callActive ? (
+                  status === 'speaking' ? (
+                    <Volume2 className="visualizer-icon" />
+                  ) : status === 'thinking' ? (
+                    <RefreshCw className="visualizer-icon" />
+                  ) : (
+                    <Mic className="visualizer-icon" />
+                  )
                 ) : (
-                  <option value="en-US-EmmaMultilingualNeural">Emma (Multilingual, US)</option>
+                  <Phone className="visualizer-icon" style={{ opacity: 0.4 }} />
                 )}
-              </select>
+              </div>
             </div>
 
-            {/* Greeting */}
-            <div className="input-group">
-              <label className="input-label">Opening Greeting Line</label>
-              <input
-                type="text"
-                value={greeting}
-                onChange={(e) => setGreeting(e.target.value)}
-                className="input-field"
-                disabled={callActive}
-              />
-            </div>
-
-            {/* Prompt Config */}
-            <div className="input-group">
-              <label className="input-label">Agent Persona & Prompt</label>
-              <textarea
-                rows="4"
-                value={systemPrompt}
-                onChange={(e) => setSystemPrompt(e.target.value)}
-                className="input-field"
-                placeholder="Give instructions to the agent..."
-                disabled={callActive}
-              />
-            </div>
-          </div>
-        </section>
-
-        {/* Center Column: Phone UI Simulation */}
-        <section className="glass-panel simulator-panel">
-          <div className="simulator-header">
-            <span>SIMULATED CELLULAR</span>
-            <div className="call-state-indicator">
-              <span className={`call-state-dot ${callActive ? 'active' : ''}`}></span>
-              <span>{callActive ? 'IN CALL' : 'IDLE'}</span>
-            </div>
-          </div>
-
-          {/* Glowing Pulse Visualizer */}
-          <div className={`visualizer-outer state-${callActive ? status : 'idle'}`}>
-            <div className="visualizer-pulse-bg"></div>
-            <div className="visualizer-core">
+            {/* Info Details */}
+            <div className="call-info-wrapper">
               {callActive ? (
-                status === 'speaking' ? (
-                  <Volume2 className="visualizer-icon" />
-                ) : status === 'thinking' ? (
-                  <RefreshCw className="visualizer-icon" />
-                ) : (
-                  <Mic className="visualizer-icon" />
-                )
+                <>
+                  <div className="call-timer">
+                    {formatTime(callDuration)}
+                  </div>
+                  <div className="call-status-label">
+                    STATUS:
+                    <span className={`status-badge-inline ${status}`}>
+                      {status}
+                    </span>
+                  </div>
+                </>
               ) : (
-                <Phone className="visualizer-icon" style={{ opacity: 0.4 }} />
+                <>
+                  <div className="call-timer" style={{ fontSize: '20px', letterSpacing: 'normal' }}>Start Conversation</div>
+                  <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '8px', maxWidth: '240px', marginLeft: 'auto', marginRight: 'auto' }}>
+                    Initiate an outbound voice simulation calling through your web browser.
+                  </p>
+                </>
               )}
             </div>
-          </div>
 
-          {/* Info Details */}
-          <div className="call-info-wrapper">
-            {callActive ? (
-              <>
-                <div className="call-timer">
-                  {formatTime(callDuration)}
-                </div>
-                <div className="call-status-label">
-                  STATUS:
-                  <span className={`status-badge-inline ${status}`}>
-                    {status}
-                  </span>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="call-timer" style={{ fontSize: '20px', letterSpacing: 'normal' }}>Start Conversation</div>
-                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '8px', maxWidth: '240px', marginLeft: 'auto', marginRight: 'auto' }}>
-                  Initiate an outbound voice simulation calling through your web browser.
-                </p>
-              </>
-            )}
-          </div>
-
-          {/* Error Banner */}
-          {errorMessage && (
-            <div className="error-banner">
-              {errorMessage}
-            </div>
-          )}
-
-          {/* Call Control Button */}
-          <div className="call-controls">
-            {callActive ? (
-              <button
-                onClick={handleHangUp}
-                className="btn-call-action hangup"
-              >
-                <PhoneOff className="h-5 w-5" />
-                Hang Up Call
-              </button>
-            ) : (
-              <button
-                onClick={handleStartCall}
-                className="btn-call-action start"
-              >
-                <Phone className="h-5 w-5" />
-                Initiate Simulator
-              </button>
-            )}
-          </div>
-
-          {/* Wave animation during speak/listen */}
-          <div className="wave-container">
-            {callActive && (
-              <div className={`wave-active`}>
-                <span className="wave-bar"></span>
-                <span className="wave-bar"></span>
-                <span className="wave-bar"></span>
-                <span className="wave-bar"></span>
-                <span className="wave-bar"></span>
-                <span className="wave-bar"></span>
-                <span className="wave-bar"></span>
+            {/* Error Banner */}
+            {errorMessage && (
+              <div className="error-banner">
+                {errorMessage}
               </div>
             )}
-          </div>
-        </section>
 
-        {/* Right Column */}
-        <div className="right-column">
-          {/* Live Transcript Panel */}
-          <section className="glass-panel transcript-panel">
-            <div className="panel-header" style={{ padding: '0 0 16px 0', borderBottom: '1px solid var(--glass-border)', marginBottom: '20px' }}>
-              <MessageSquare className="panel-icon" style={{ color: 'var(--accent-cyan)' }} />
-              <h2 className="panel-title">Live Call Logs & Transcript</h2>
+            {/* Call Control Button */}
+            <div className="call-controls">
+              {callActive ? (
+                <button
+                  onClick={handleHangUp}
+                  className="btn-call-action hangup"
+                >
+                  <PhoneOff className="h-5 w-5" />
+                  Hang Up Call
+                </button>
+              ) : (
+                <button
+                  onClick={handleStartCall}
+                  className="btn-call-action start"
+                >
+                  <Phone className="h-5 w-5" />
+                  Initiate Simulator
+                </button>
+              )}
             </div>
 
-            {/* Transcript Scroll Area */}
-            <div className="transcript-scroll">
-              {transcripts.length === 0 ? (
-                <div className="transcript-empty">
-                  <VolumeX className="transcript-empty-icon" />
-                  <p className="transcript-empty-text">
-                    No active conversation logs. Transcripts will appear here in real-time when the call is initiated.
-                  </p>
+            {/* Wave animation during speak/listen */}
+            <div className="wave-container">
+              {callActive && (
+                <div className={`wave-active`}>
+                  <span className="wave-bar"></span>
+                  <span className="wave-bar"></span>
+                  <span className="wave-bar"></span>
+                  <span className="wave-bar"></span>
+                  <span className="wave-bar"></span>
+                  <span className="wave-bar"></span>
+                  <span className="wave-bar"></span>
                 </div>
-              ) : (
-                transcripts.map(log => {
-                  if (log.role === 'system') {
+              )}
+            </div>
+          </section>
+
+          {/* Right Column */}
+          <div className="right-column">
+            {/* Live Transcript Panel */}
+            <section className="glass-panel transcript-panel">
+              <div className="panel-header" style={{ padding: '0 0 16px 0', borderBottom: '1px solid var(--glass-border)', marginBottom: '20px' }}>
+                <MessageSquare className="panel-icon" style={{ color: 'var(--accent-cyan)' }} />
+                <h2 className="panel-title">Live Call Logs & Transcript</h2>
+              </div>
+
+              {/* Transcript Scroll Area */}
+              <div className="transcript-scroll">
+                {transcripts.length === 0 ? (
+                  <div className="transcript-empty">
+                    <VolumeX className="transcript-empty-icon" />
+                    <p className="transcript-empty-text">
+                      No active conversation logs. Transcripts will appear here in real-time when the call is initiated.
+                    </p>
+                  </div>
+                ) : (
+                  transcripts.map(log => {
+                    if (log.role === 'system') {
+                      return (
+                        <div key={log.id} className="system-pill-wrapper">
+                          <span className="system-pill">
+                            {log.text}
+                          </span>
+                        </div>
+                      );
+                    }
+
+                    const isAgent = log.role === 'agent';
                     return (
-                      <div key={log.id} className="system-pill-wrapper">
-                        <span className="system-pill">
-                          {log.text}
+                      <div
+                        key={log.id}
+                        className={`bubble-wrapper ${isAgent ? 'agent' : 'user'}`}
+                      >
+                        <div className="bubble-content">
+                          <p>{log.text}</p>
+                        </div>
+                        <span className="bubble-meta">
+                          {isAgent ? 'Agent' : 'You'} • {log.timestamp}
                         </span>
                       </div>
                     );
-                  }
-
-                  const isAgent = log.role === 'agent';
-                  return (
-                    <div
-                      key={log.id}
-                      className={`bubble-wrapper ${isAgent ? 'agent' : 'user'}`}
-                    >
-                      <div className="bubble-content">
-                        <p>{log.text}</p>
-                      </div>
-                      <span className="bubble-meta">
-                        {isAgent ? 'Agent' : 'You'} • {log.timestamp}
-                      </span>
-                    </div>
-                  );
-                })
-              )}
-            </div>
-
-            {/* Helper Tips */}
-            {callActive && (
-              <div className="turn-helper-footer">
-                {status === 'listening' ? (
-                  interimSpeech ? `🎤 "${interimSpeech}"` : '🎤 Go ahead and speak now!'
-                ) :
-                  status === 'speaking' ? '🔊 Agent is currently talking. Please wait.' :
-                    status === 'thinking' ? '⚙️ Agent is thinking...' :
-                      'Preparing conversation...'}
+                  })
+                )}
               </div>
+
+              {/* Helper Tips */}
+              {callActive && (
+                <div className="turn-helper-footer">
+                  {status === 'listening' ? (
+                    interimSpeech ? `🎤 "${interimSpeech}"` : '🎤 Go ahead and speak now!'
+                  ) :
+                    status === 'speaking' ? '🔊 Agent is currently talking. Please wait.' :
+                      status === 'thinking' ? '⚙️ Agent is thinking...' :
+                        'Preparing conversation...'}
+                </div>
+              )}
+            </section>
+          </div>
+        </div>
+      )}
+
+      {/* Agents Manager Tab */}
+      {activeTab === 'agents' && (
+        <div className="agents-grid">
+          {/* Saved Agents List */}
+          <section className="glass-panel agents-list-panel">
+            <div className="panel-header" style={{ marginBottom: '16px' }}>
+              <Database className="panel-icon" style={{ color: 'var(--accent-cyan)' }} />
+              <h2 className="panel-title">Saved Agent Personas</h2>
+            </div>
+            
+            {agents.length === 0 ? (
+              <div className="transcript-empty">
+                <VolumeX className="transcript-empty-icon" />
+                <p className="transcript-empty-text">
+                  No saved agents found. Use the form to create your first agent persona.
+                </p>
+              </div>
+            ) : (
+              agents.map(a => (
+                <div 
+                  key={a.id} 
+                  className={`agent-item-card ${selectedAgentId === a.id.toString() ? 'selected' : ''}`}
+                  onClick={() => handleAgentSelectChange(a.id.toString())}
+                >
+                  <div className="agent-card-info">
+                    <h3>{a.name}</h3>
+                    <p>{a.system_prompt}</p>
+                    <span className="agent-card-voice">{voices.find(v => v.id === a.voice_id)?.name || a.voice_id}</span>
+                  </div>
+                  <div className="agent-card-actions">
+                    <button 
+                      className="btn-icon edit" 
+                      onClick={(e) => handleEditAgentClick(a, e)}
+                      title="Edit Agent"
+                    >
+                      <Edit3 className="h-3.5 w-3.5" />
+                    </button>
+                    <button 
+                      className="btn-icon delete" 
+                      onClick={(e) => handleDeleteAgent(a.id, e)}
+                      title="Delete Agent"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ))
             )}
           </section>
 
+          {/* Create / Edit Form */}
+          <section className="glass-panel">
+            <div className="panel-header">
+              <SettingsIcon className="panel-icon" />
+              <h2 className="panel-title">{editingAgentId ? `Edit Agent: ${formName}` : 'Create New Agent Persona'}</h2>
+            </div>
+            
+            <form onSubmit={handleSaveAgent} className="form-content" style={{ marginTop: '16px' }}>
+              <div className="input-group">
+                <label className="input-label">Agent Name</label>
+                <input
+                  type="text"
+                  value={formName}
+                  onChange={(e) => setFormName(e.target.value)}
+                  className="input-field"
+                  placeholder="e.g. Alex (Support), Sarah (Billing)..."
+                  required
+                />
+              </div>
 
+              <div className="input-group">
+                <label className="input-label">Agent Voice & Accent</label>
+                <select
+                  value={formVoice}
+                  onChange={(e) => setFormVoice(e.target.value)}
+                  className="input-field"
+                >
+                  {voices.map(v => (
+                    <option key={v.id} value={v.id} className="bg-slate-900 text-white">
+                      {v.name} ({v.gender})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="input-group">
+                <label className="input-label">Opening Greeting Line</label>
+                <input
+                  type="text"
+                  value={formGreeting}
+                  onChange={(e) => setFormGreeting(e.target.value)}
+                  className="input-field"
+                  placeholder="e.g. Hi! This is Sarah calling to follow up on your support ticket..."
+                  required
+                />
+              </div>
+
+              <div className="input-group">
+                <label className="input-label">Agent Instructions & Prompt</label>
+                <textarea
+                  rows="5"
+                  value={formPrompt}
+                  onChange={(e) => setFormPrompt(e.target.value)}
+                  className="input-field"
+                  placeholder="Define goals, boundaries, and personality of your agent..."
+                  required
+                />
+              </div>
+
+              <div style={{ display: 'flex', gap: '12px', marginTop: '24px' }}>
+                <button type="submit" className="btn-call-action start" style={{ flexGrow: 1, padding: '12px 18px', fontSize: '13px' }}>
+                  {editingAgentId ? 'Update Agent Persona' : 'Save Agent Persona'}
+                </button>
+                {editingAgentId && (
+                  <button 
+                    type="button" 
+                    className="btn-call-action hangup" 
+                    style={{ padding: '12px 18px', fontSize: '13px' }}
+                    onClick={() => {
+                      setEditingAgentId(null);
+                      setFormName('');
+                      setFormPrompt('');
+                      setFormGreeting('');
+                    }}
+                  >
+                    Cancel
+                  </button>
+                )}
+              </div>
+            </form>
+          </section>
         </div>
+      )}
 
-      </div>
+      {/* Call History Tab */}
+      {activeTab === 'history' && (
+        <div className="history-grid">
+          {/* Left panel: List of Calls */}
+          <section className="glass-panel history-list-container">
+            <div className="panel-header" style={{ marginBottom: '16px' }}>
+              <Activity className="panel-icon" style={{ color: 'var(--accent-cyan)' }} />
+              <h2 className="panel-title">Call Logs History</h2>
+            </div>
+            
+            {calls.length === 0 ? (
+              <div className="transcript-empty">
+                <VolumeX className="transcript-empty-icon" />
+                <p className="transcript-empty-text">
+                  No logged calls found. Call logs will appear here after calls are completed.
+                </p>
+              </div>
+            ) : (
+              calls.map(c => {
+                const linkedAgent = agents.find(a => a.id === c.agent_id);
+                const agentName = linkedAgent ? linkedAgent.name : "Custom Agent";
+                const isSelected = activeHistoryCall && activeHistoryCall.id === c.id;
+                
+                return (
+                  <div 
+                    key={c.id} 
+                    className={`history-card ${isSelected ? 'active' : ''}`}
+                    onClick={() => setActiveHistoryCall(c)}
+                  >
+                    <div className="history-card-header">
+                      <span className="history-agent-name">{agentName}</span>
+                      <span className="history-date">
+                        {new Date(c.start_time).toLocaleString()}
+                      </span>
+                    </div>
+                    <div className="history-card-body">
+                      <div className="history-stat">
+                        <Clock className="h-3.5 w-3.5 text-slate-400" />
+                        <span>{formatTime(c.duration)}</span>
+                      </div>
+                      <div className="history-stat">
+                        <span className={`status-badge-inline ${c.status === 'completed' ? 'listening' : 'error'}`} style={{ padding: '1px 6px', fontSize: '10px' }}>
+                          {c.status.toUpperCase()}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </section>
+
+          {/* Right panel: Call Details & Transcript */}
+          <section className="glass-panel history-detail-panel">
+            {activeHistoryCall ? (
+              <>
+                <div className="history-detail-header">
+                  <h2 style={{ fontSize: '20px', color: 'var(--text-primary)' }}>
+                    Call Log Detail
+                  </h2>
+                  <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                    Started: {new Date(activeHistoryCall.start_time).toLocaleString()} • Duration: {formatTime(activeHistoryCall.duration)}
+                  </p>
+                </div>
+                
+                <div className="history-transcript-area">
+                  {(() => {
+                    try {
+                      const transcriptLogs = JSON.parse(activeHistoryCall.transcription_log || '[]');
+                      if (transcriptLogs.length === 0) {
+                        return <p style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>No conversation transcript recorded.</p>;
+                      }
+                      return transcriptLogs.map((log, idx) => {
+                        if (log.role === 'system') {
+                          return (
+                            <div key={idx} className="system-pill-wrapper">
+                              <span className="system-pill">
+                                {log.text || log.content}
+                              </span>
+                            </div>
+                          );
+                        }
+                        const isAgent = log.role === 'agent' || log.role === 'assistant';
+                        return (
+                          <div 
+                            key={idx} 
+                            className={`bubble-wrapper ${isAgent ? 'agent' : 'user'}`}
+                            style={{ margin: '8px 0' }}
+                          >
+                            <div className="bubble-content">
+                              <p>{log.text || log.content}</p>
+                            </div>
+                            <span className="bubble-meta">
+                              {isAgent ? 'Agent' : 'User'}
+                            </span>
+                          </div>
+                        );
+                      });
+                    } catch (e) {
+                      return <p style={{ color: 'var(--status-error)' }}>Error parsing transcript log JSON.</p>;
+                    }
+                  })()}
+                </div>
+              </>
+            ) : (
+              <div className="transcript-empty" style={{ margin: 'auto' }}>
+                <MessageSquare className="transcript-empty-icon" style={{ opacity: 0.2 }} />
+                <p className="transcript-empty-text">
+                  Select a call from the history list to view the full details and transcription log.
+                </p>
+              </div>
+            )}
+          </section>
+        </div>
+      )}
     </div>
   );
 }
