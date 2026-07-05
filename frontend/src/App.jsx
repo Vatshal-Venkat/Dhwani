@@ -483,76 +483,85 @@ function App() {
             });
           }
         };
+
+        recorder.onstop = () => {
+          console.log("MediaRecorder stopped callback");
+          if (callActiveRef.current) {
+            // Wait a tiny bit (50ms) to ensure any pending dataavailable chunk is fully sent first
+            setTimeout(() => {
+              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ type: 'speech_end' }));
+              }
+            }, 50);
+          }
+        };
+
+        // Initialize Silero VAD with local assets, sharing the same stream
+        if (window.vad) {
+          window.vad.MicVAD.new({
+            stream: stream,
+            baseAssetPath: "/",
+            modelURL: "/silero_vad_v5.onnx",
+            ortConfig: (ort) => {
+              // Disable WASM threads to bypass secure context (SharedArrayBuffer) requirements on localhost
+              ort.env.wasm.numThreads = 1;
+              // Point to local WASM files in the public directory
+              ort.env.wasm.wasmPaths = "/";
+            },
+            onSpeechStart: () => {
+              console.log("VAD: user speech started");
+              userSpokeVADRef.current = true;
+              if (callActiveRef.current) {
+                if (isSpeakingRef.current) {
+                  handleBargeIn();
+                }
+                // Notify backend speech started
+                if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                  wsRef.current.send(JSON.stringify({ type: 'speech_start' }));
+                }
+                // Start recording
+                if (mediaRecorderRef.current && mediaRecorderRef.current.state === "inactive") {
+                  try {
+                    mediaRecorderRef.current.start(100);
+                    console.log("MediaRecorder started");
+                  } catch (e) {
+                    console.error("Error starting MediaRecorder:", e);
+                  }
+                }
+              }
+            },
+            onSpeechEnd: (audio) => {
+              console.log("VAD: user speech ended");
+              if (callActiveRef.current) {
+                // Stop recording. The onstop callback will notify the backend of speech_end.
+                if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+                  try {
+                    mediaRecorderRef.current.stop();
+                    console.log("MediaRecorder stopped");
+                  } catch (e) {
+                    console.error("Error stopping MediaRecorder:", e);
+                  }
+                }
+              }
+            }
+          })
+            .then((myvad) => {
+              console.log("VAD initialized successfully");
+              vadRef.current = myvad;
+              myvad.start();
+            })
+            .catch((err) => {
+              console.error("VAD initialization failed:", err);
+              setErrorMessage(`VAD failed to initialize: ${err.message || err}.`);
+            });
+        } else {
+          console.warn("VAD script not found in window context");
+          setErrorMessage("VAD script not loaded.");
+        }
       })
       .catch((err) => {
         console.error("Microphone access denied or failed for MediaRecorder:", err);
       });
-
-    // Initialize Silero VAD with local assets and Single-Threaded ONNX Runtime
-    if (window.vad) {
-      window.vad.MicVAD.new({
-        baseAssetPath: "/",
-        modelURL: "/silero_vad_v5.onnx",
-        ortConfig: (ort) => {
-          // Disable WASM threads to bypass secure context (SharedArrayBuffer) requirements on localhost
-          ort.env.wasm.numThreads = 1;
-          // Point to local WASM files in the public directory
-          ort.env.wasm.wasmPaths = "/";
-        },
-        onSpeechStart: () => {
-          console.log("VAD: user speech started");
-          userSpokeVADRef.current = true;
-          if (callActiveRef.current) {
-            if (isSpeakingRef.current) {
-              handleBargeIn();
-            }
-            // Notify backend speech started
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-              wsRef.current.send(JSON.stringify({ type: 'speech_start' }));
-            }
-            // Start recording
-            if (mediaRecorderRef.current && mediaRecorderRef.current.state === "inactive") {
-              try {
-                mediaRecorderRef.current.start(100);
-                console.log("MediaRecorder started");
-              } catch (e) {
-                console.error("Error starting MediaRecorder:", e);
-              }
-            }
-          }
-        },
-        onSpeechEnd: (audio) => {
-          console.log("VAD: user speech ended");
-          if (callActiveRef.current) {
-            // Stop recording
-            if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-              try {
-                mediaRecorderRef.current.stop();
-                console.log("MediaRecorder stopped");
-              } catch (e) {
-                console.error("Error stopping MediaRecorder:", e);
-              }
-            }
-            // Notify backend speech ended
-            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-              wsRef.current.send(JSON.stringify({ type: 'speech_end' }));
-            }
-          }
-        }
-      })
-        .then((myvad) => {
-          console.log("VAD initialized successfully");
-          vadRef.current = myvad;
-          myvad.start();
-        })
-        .catch((err) => {
-          console.error("VAD initialization failed:", err);
-          setErrorMessage(`VAD failed to initialize: ${err.message || err}.`);
-        });
-    } else {
-      console.warn("VAD script not found in window context");
-      setErrorMessage("VAD script not loaded.");
-    }
 
     // Connect to WebSocket Server
     const wsUrl = `ws://localhost:8000/ws/call`;
@@ -594,6 +603,8 @@ function App() {
       } else if (data.type === 'status') {
         if (data.status === 'thinking') {
           setStatus('thinking');
+        } else if (data.status === 'listening') {
+          setStatus('listening');
         } else if (data.status === 'error') {
           setErrorMessage(data.message);
           setStatus('error');
