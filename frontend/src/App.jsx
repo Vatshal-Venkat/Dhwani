@@ -461,40 +461,6 @@ function App() {
     navigator.mediaDevices.getUserMedia({ audio: true })
       .then((stream) => {
         micStreamRef.current = stream;
-        
-        let options = { mimeType: 'audio/webm;codecs=opus' };
-        if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-          options = { mimeType: 'audio/webm' };
-        }
-        if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-          options = { mimeType: 'audio/ogg;codecs=opus' };
-        }
-        if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-          options = { mimeType: '' }; // default browser format
-        }
-
-        const recorder = new MediaRecorder(stream, options);
-        mediaRecorderRef.current = recorder;
-
-        recorder.ondataavailable = (event) => {
-          if (event.data.size > 0 && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-            event.data.arrayBuffer().then((buffer) => {
-              wsRef.current.send(buffer);
-            });
-          }
-        };
-
-        recorder.onstop = () => {
-          console.log("MediaRecorder stopped callback");
-          if (callActiveRef.current) {
-            // Wait a tiny bit (50ms) to ensure any pending dataavailable chunk is fully sent first
-            setTimeout(() => {
-              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                wsRef.current.send(JSON.stringify({ type: 'speech_end' }));
-              }
-            }, 50);
-          }
-        };
 
         // Initialize Silero VAD with local assets, sharing the same stream
         if (window.vad) {
@@ -519,14 +485,59 @@ function App() {
                 if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
                   wsRef.current.send(JSON.stringify({ type: 'speech_start' }));
                 }
-                // Start recording
-                if (mediaRecorderRef.current && mediaRecorderRef.current.state === "inactive") {
+
+                // If there's an existing recorder that is still recording or stopping, stop and clean it up
+                if (mediaRecorderRef.current) {
                   try {
-                    mediaRecorderRef.current.start(100);
-                    console.log("MediaRecorder started");
+                    if (mediaRecorderRef.current.state !== "inactive") {
+                      mediaRecorderRef.current.stop();
+                    }
                   } catch (e) {
-                    console.error("Error starting MediaRecorder:", e);
+                    console.error("Error stopping previous MediaRecorder:", e);
                   }
+                  mediaRecorderRef.current = null;
+                }
+
+                // Create a new MediaRecorder for this speech segment
+                try {
+                  let options = { mimeType: 'audio/webm;codecs=opus' };
+                  if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                    options = { mimeType: 'audio/webm' };
+                  }
+                  if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                    options = { mimeType: 'audio/ogg;codecs=opus' };
+                  }
+                  if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                    options = { mimeType: '' }; // default browser format
+                  }
+
+                  const recorder = new MediaRecorder(stream, options);
+                  mediaRecorderRef.current = recorder;
+
+                  recorder.ondataavailable = (event) => {
+                    if (event.data.size > 0 && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                      event.data.arrayBuffer().then((buffer) => {
+                        wsRef.current.send(buffer);
+                      });
+                    }
+                  };
+
+                  recorder.onstop = () => {
+                    console.log("MediaRecorder stopped callback");
+                    if (callActiveRef.current) {
+                      // Wait a tiny bit (50ms) to ensure any pending dataavailable chunk is fully sent first
+                      setTimeout(() => {
+                        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                          wsRef.current.send(JSON.stringify({ type: 'speech_end' }));
+                        }
+                      }, 50);
+                    }
+                  };
+
+                  recorder.start(100);
+                  console.log("MediaRecorder started");
+                } catch (e) {
+                  console.error("Error starting MediaRecorder:", e);
                 }
               }
             },
