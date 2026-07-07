@@ -526,11 +526,11 @@ async def websocket_call_endpoint(websocket: WebSocket):
                     })
                     
                     try:
-                        # Transcribe WebM using Groq Whisper
+                        # Transcribe WAV using Groq Whisper
                         if not stt_service:
                             stt_service = STTService()
                             
-                        transcribed_text = await stt_service.transcribe_audio(bytes(audio_buffer))
+                        transcribed_text = await stt_service.transcribe_audio(bytes(audio_buffer), filename="speech.wav")
                         logger.info(f"Groq Whisper Transcription: '{transcribed_text}'")
                         
                         if not transcribed_text.strip():
