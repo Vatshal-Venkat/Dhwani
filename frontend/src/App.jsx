@@ -457,7 +457,55 @@ function App() {
     isSpeakingRef.current = false;
     userSpokeVADRef.current = false;
 
-    // Set up microphone capture and MediaRecorder for streaming
+    // Helper to convert Float32Array to 16-bit PCM WAV
+    const float32To16BitPCM = (float32Array) => {
+      const buffer = new ArrayBuffer(float32Array.length * 2);
+      const view = new DataView(buffer);
+      let offset = 0;
+      for (let i = 0; i < float32Array.length; i++, offset += 2) {
+        let s = Math.max(-1, Math.min(1, float32Array[i]));
+        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+      }
+      return buffer;
+    };
+
+    const writeString = (view, offset, string) => {
+      for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+      }
+    };
+
+    const writeWavHeader = (sampleRate, numChannels, numSamples) => {
+      const buffer = new ArrayBuffer(44);
+      const view = new DataView(buffer);
+      
+      writeString(view, 0, 'RIFF');
+      view.setUint32(4, 36 + numSamples * 2, true);
+      writeString(view, 8, 'WAVE');
+      writeString(view, 12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, numChannels, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * numChannels * 2, true);
+      view.setUint16(32, numChannels * 2, true);
+      view.setUint16(34, 16, true);
+      writeString(view, 36, 'data');
+      view.setUint32(40, numSamples * 2, true);
+      
+      return buffer;
+    };
+
+    const convertToWav = (float32Array, sampleRate = 16000) => {
+      const header = writeWavHeader(sampleRate, 1, float32Array.length);
+      const pcm = float32To16BitPCM(float32Array);
+      const wavBytes = new Uint8Array(header.byteLength + pcm.byteLength);
+      wavBytes.set(new Uint8Array(header), 0);
+      wavBytes.set(new Uint8Array(pcm), header.byteLength);
+      return wavBytes.buffer;
+    };
+
+    // Set up microphone capture and VAD for streaming
     navigator.mediaDevices.getUserMedia({ audio: true })
       .then((stream) => {
         micStreamRef.current = stream;
@@ -485,73 +533,26 @@ function App() {
                 if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
                   wsRef.current.send(JSON.stringify({ type: 'speech_start' }));
                 }
-
-                // If there's an existing recorder that is still recording or stopping, stop and clean it up
-                if (mediaRecorderRef.current) {
-                  try {
-                    if (mediaRecorderRef.current.state !== "inactive") {
-                      mediaRecorderRef.current.stop();
-                    }
-                  } catch (e) {
-                    console.error("Error stopping previous MediaRecorder:", e);
-                  }
-                  mediaRecorderRef.current = null;
-                }
-
-                // Create a new MediaRecorder for this speech segment
-                try {
-                  let options = { mimeType: 'audio/webm;codecs=opus' };
-                  if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-                    options = { mimeType: 'audio/webm' };
-                  }
-                  if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-                    options = { mimeType: 'audio/ogg;codecs=opus' };
-                  }
-                  if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-                    options = { mimeType: '' }; // default browser format
-                  }
-
-                  const recorder = new MediaRecorder(stream, options);
-                  mediaRecorderRef.current = recorder;
-
-                  recorder.ondataavailable = (event) => {
-                    if (event.data.size > 0 && wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                      event.data.arrayBuffer().then((buffer) => {
-                        wsRef.current.send(buffer);
-                      });
-                    }
-                  };
-
-                  recorder.onstop = () => {
-                    console.log("MediaRecorder stopped callback");
-                    if (callActiveRef.current) {
-                      // Wait a tiny bit (50ms) to ensure any pending dataavailable chunk is fully sent first
-                      setTimeout(() => {
-                        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-                          wsRef.current.send(JSON.stringify({ type: 'speech_end' }));
-                        }
-                      }, 50);
-                    }
-                  };
-
-                  recorder.start(100);
-                  console.log("MediaRecorder started");
-                } catch (e) {
-                  console.error("Error starting MediaRecorder:", e);
-                }
               }
             },
             onSpeechEnd: (audio) => {
               console.log("VAD: user speech ended");
-              if (callActiveRef.current) {
-                // Stop recording. The onstop callback will notify the backend of speech_end.
-                if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-                  try {
-                    mediaRecorderRef.current.stop();
-                    console.log("MediaRecorder stopped");
-                  } catch (e) {
-                    console.error("Error stopping MediaRecorder:", e);
+              if (callActiveRef.current && audio && audio.length > 0) {
+                try {
+                  const wavBuffer = convertToWav(audio, 16000);
+                  if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                    wsRef.current.send(wavBuffer);
+                    console.log(`Sent WAV audio of ${audio.length} samples to backend.`);
+                    
+                    // Wait a tiny bit (50ms) to ensure any pending audio chunk is fully processed
+                    setTimeout(() => {
+                      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+                        wsRef.current.send(JSON.stringify({ type: 'speech_end' }));
+                      }
+                    }, 50);
                   }
+                } catch (e) {
+                  console.error("Error encoding speech WAV:", e);
                 }
               }
             }
@@ -571,8 +572,9 @@ function App() {
         }
       })
       .catch((err) => {
-        console.error("Microphone access denied or failed for MediaRecorder:", err);
+        console.error("Microphone access denied or failed for VAD:", err);
       });
+
 
     // Connect to WebSocket Server
     const wsUrl = `ws://localhost:8000/ws/call`;
