@@ -69,6 +69,16 @@ function App() {
   const vadRef = useRef(null);
   const micStreamRef = useRef(null);
   const mediaRecorderRef = useRef(null);
+  const transcriptEndRef = useRef(null);
+
+  // Refs for Web Audio API visualizer
+  const audioContextRef = useRef(null);
+  const micAnalyserRef = useRef(null);
+  const agentAnalyserRef = useRef(null);
+  const canvasRef = useRef(null);
+  const animationFrameRef = useRef(null);
+  const phaseRef = useRef(0);
+  const statusRef = useRef(status);
 
   // Refs to avoid state capture in async event handlers
   const callActiveRef = useRef(false);
@@ -79,6 +89,180 @@ function App() {
   useEffect(() => {
     callActiveRef.current = callActive;
   }, [callActive]);
+
+  // Keep statusRef updated
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
+
+  // Auto-scroll transcript to bottom
+  useEffect(() => {
+    if (transcriptEndRef.current) {
+      transcriptEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [transcripts]);
+
+  // Visualizer Animation Loop
+  useEffect(() => {
+    const drawVisualizer = () => {
+      if (!canvasRef.current) return;
+      const canvas = canvasRef.current;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      const width = canvas.width;
+      const height = canvas.height;
+
+      // Clear canvas
+      ctx.clearRect(0, 0, width, height);
+
+      const isActive = callActiveRef.current;
+      const currentStatus = statusRef.current;
+
+      // Determine target analyser
+      let analyser = null;
+      if (isActive) {
+        if (currentStatus === 'listening') {
+          analyser = micAnalyserRef.current;
+        } else if (currentStatus === 'speaking') {
+          analyser = agentAnalyserRef.current;
+        }
+      }
+
+      // Get volume (RMS)
+      let volume = 0.015; // default subtle baseline noise
+      
+      if (isActive) {
+        if (currentStatus === 'thinking') {
+          // Slow pulsing sine wave for thinking state
+          volume = 0.08 + Math.sin(Date.now() / 200) * 0.03;
+        } else if (currentStatus === 'dialing') {
+          // Pulse wave for dialing
+          volume = 0.03 + Math.sin(Date.now() / 150) * 0.01;
+        } else if (analyser) {
+          const bufferLength = analyser.frequencyBinCount;
+          const dataArray = new Uint8Array(bufferLength);
+          analyser.getByteTimeDomainData(dataArray);
+
+          // Calculate RMS (volume)
+          let sum = 0;
+          for (let i = 0; i < bufferLength; i++) {
+            const val = (dataArray[i] - 128) / 128;
+            sum += val * val;
+          }
+          const rms = Math.sqrt(sum / bufferLength);
+          // Map rms to volume with a boost for visualization clarity
+          volume = Math.max(0.015, rms * 1.8);
+        }
+      }
+
+      // Increment phase for horizontal movement
+      phaseRef.current = (phaseRef.current || 0) + (isActive && currentStatus === 'thinking' ? 0.08 : 0.12);
+      const phase = phaseRef.current;
+
+      const centerY = height / 2;
+      ctx.lineCap = 'round';
+
+      // Choose colors and waves based on status
+      let colors = [];
+      if (!isActive) {
+        colors = [
+          'rgba(148, 163, 184, 0.25)',  // Slate
+          'rgba(148, 163, 184, 0.12)',
+          'rgba(148, 163, 184, 0.05)',
+        ];
+      } else {
+        switch (currentStatus) {
+          case 'dialing':
+            colors = [
+              'rgba(245, 158, 11, 0.5)',   // Amber
+              'rgba(245, 158, 11, 0.25)',
+              'rgba(245, 158, 11, 0.1)',
+            ];
+            break;
+          case 'thinking':
+            colors = [
+              'rgba(6, 182, 212, 0.65)',   // Cyan
+              'rgba(99, 102, 241, 0.35)',  // Indigo
+              'rgba(168, 85, 247, 0.15)',  // Violet
+            ];
+            break;
+          case 'listening':
+            colors = [
+              'rgba(16, 185, 129, 0.75)',  // Emerald green
+              'rgba(6, 182, 212, 0.4)',   // Cyan
+              'rgba(14, 165, 233, 0.15)',  // Sky blue
+            ];
+            break;
+          case 'speaking':
+            colors = [
+              'rgba(168, 85, 247, 0.75)',  // Violet
+              'rgba(139, 92, 246, 0.4)',   // Purple
+              'rgba(99, 102, 241, 0.15)',  // Indigo
+            ];
+            break;
+          default:
+            colors = [
+              'rgba(148, 163, 184, 0.3)',
+              'rgba(148, 163, 184, 0.15)',
+              'rgba(148, 163, 184, 0.05)',
+            ];
+        }
+      }
+
+      // Draw 3 layers of waves
+      for (let l = 0; l < 3; l++) {
+        ctx.beginPath();
+        ctx.strokeStyle = colors[l];
+        ctx.lineWidth = l === 0 ? 2.5 : 1.5;
+        
+        if (l === 0 && isActive) {
+          ctx.shadowBlur = 10;
+          ctx.shadowColor = colors[0];
+        } else {
+          ctx.shadowBlur = 0;
+        }
+
+        const frequency = 1.0 + l * 0.4;
+        const phaseShift = phase + l * (Math.PI / 2.5);
+
+        for (let x = 0; x <= width; x++) {
+          // Envelop to taper off at boundaries
+          const normX = (x / width) * 2 - 1;
+          const envelope = Math.pow(1 - normX * normX, 2);
+
+          // Siri style wave formula
+          const sine = Math.sin(normX * Math.PI * frequency + phaseShift);
+          
+          let amp = volume * (height * 0.45);
+          if (l > 0) amp *= 0.55;
+
+          const y = centerY + sine * amp * envelope;
+
+          if (x === 0) {
+            ctx.moveTo(x, y);
+          } else {
+            ctx.lineTo(x, y);
+          }
+        }
+        ctx.stroke();
+      }
+      ctx.shadowBlur = 0;
+    };
+
+    const runLoop = () => {
+      drawVisualizer();
+      animationFrameRef.current = requestAnimationFrame(runLoop);
+    };
+
+    runLoop();
+
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+    };
+  }, []);
 
   // Fetch available voices, configurations, agents, and calls from Backend
   const fetchAgents = async () => {
@@ -376,6 +560,20 @@ function App() {
     const audio = new Audio(audioUrl);
     audioRef.current = audio;
 
+    // Connect agent audio element to agent analyser
+    if (audioContextRef.current && agentAnalyserRef.current) {
+      try {
+        if (audioContextRef.current.state === 'suspended') {
+          audioContextRef.current.resume();
+        }
+        const source = audioContextRef.current.createMediaElementSource(audio);
+        source.connect(agentAnalyserRef.current);
+        agentAnalyserRef.current.connect(audioContextRef.current.destination);
+      } catch (e) {
+        console.error("Error connecting agent audio to Web Audio API:", e);
+      }
+    }
+
     audio.onplay = () => {
       addTranscript('agent', text);
     };
@@ -457,6 +655,23 @@ function App() {
     isSpeakingRef.current = false;
     userSpokeVADRef.current = false;
 
+    // Initialize Web Audio API for visualizer
+    try {
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      const audioCtx = new AudioContextClass();
+      audioContextRef.current = audioCtx;
+      
+      const micAnalyser = audioCtx.createAnalyser();
+      micAnalyser.fftSize = 512;
+      micAnalyserRef.current = micAnalyser;
+
+      const agentAnalyser = audioCtx.createAnalyser();
+      agentAnalyser.fftSize = 512;
+      agentAnalyserRef.current = agentAnalyser;
+    } catch (e) {
+      console.error("Failed to initialize Web Audio API:", e);
+    }
+
     // Helper to convert Float32Array to 16-bit PCM WAV
     const float32To16BitPCM = (float32Array) => {
       const buffer = new ArrayBuffer(float32Array.length * 2);
@@ -509,6 +724,19 @@ function App() {
     navigator.mediaDevices.getUserMedia({ audio: true })
       .then((stream) => {
         micStreamRef.current = stream;
+
+        // Connect mic stream to mic analyser
+        if (audioContextRef.current && micAnalyserRef.current) {
+          try {
+            if (audioContextRef.current.state === 'suspended') {
+              audioContextRef.current.resume();
+            }
+            const micSource = audioContextRef.current.createMediaStreamSource(stream);
+            micSource.connect(micAnalyserRef.current);
+          } catch (e) {
+            console.error("Error connecting mic stream to analyser:", e);
+          }
+        }
 
         // Initialize Silero VAD with local assets, sharing the same stream
         if (window.vad) {
@@ -687,6 +915,20 @@ function App() {
       audioRef.current.pause();
       audioRef.current = null;
     }
+
+    // Clean up Web Audio API context and nodes
+    if (audioContextRef.current) {
+      try {
+        if (audioContextRef.current.state !== 'closed') {
+          audioContextRef.current.close();
+        }
+      } catch (e) {
+        console.error("Error closing AudioContext:", e);
+      }
+      audioContextRef.current = null;
+    }
+    micAnalyserRef.current = null;
+    agentAnalyserRef.current = null;
 
     // Stop Speech Recognition
     if (recognitionRef.current) {
@@ -949,17 +1191,7 @@ function App() {
 
             {/* Wave animation during speak/listen */}
             <div className="wave-container">
-              {callActive && (
-                <div className={`wave-active`}>
-                  <span className="wave-bar"></span>
-                  <span className="wave-bar"></span>
-                  <span className="wave-bar"></span>
-                  <span className="wave-bar"></span>
-                  <span className="wave-bar"></span>
-                  <span className="wave-bar"></span>
-                  <span className="wave-bar"></span>
-                </div>
-              )}
+              <canvas ref={canvasRef} width="350" height="70" className="visualizer-canvas" />
             </div>
           </section>
 
@@ -982,32 +1214,35 @@ function App() {
                     </p>
                   </div>
                 ) : (
-                  transcripts.map(log => {
-                    if (log.role === 'system') {
+                  <>
+                    {transcripts.map(log => {
+                      if (log.role === 'system') {
+                        return (
+                          <div key={log.id} className="system-pill-wrapper">
+                            <span className="system-pill">
+                              {log.text}
+                            </span>
+                          </div>
+                        );
+                      }
+
+                      const isAgent = log.role === 'agent';
                       return (
-                        <div key={log.id} className="system-pill-wrapper">
-                          <span className="system-pill">
-                            {log.text}
+                        <div
+                          key={log.id}
+                          className={`bubble-wrapper ${isAgent ? 'agent' : 'user'}`}
+                        >
+                          <div className="bubble-content">
+                            <p>{log.text}</p>
+                          </div>
+                          <span className="bubble-meta">
+                            {isAgent ? 'Agent' : 'You'} • {log.timestamp}
                           </span>
                         </div>
                       );
-                    }
-
-                    const isAgent = log.role === 'agent';
-                    return (
-                      <div
-                        key={log.id}
-                        className={`bubble-wrapper ${isAgent ? 'agent' : 'user'}`}
-                      >
-                        <div className="bubble-content">
-                          <p>{log.text}</p>
-                        </div>
-                        <span className="bubble-meta">
-                          {isAgent ? 'Agent' : 'You'} • {log.timestamp}
-                        </span>
-                      </div>
-                    );
-                  })
+                    })}
+                    <div ref={transcriptEndRef} />
+                  </>
                 )}
               </div>
 
