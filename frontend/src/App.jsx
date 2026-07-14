@@ -52,7 +52,6 @@ function App() {
   const [calls, setCalls] = useState([]);
   const [activeHistoryCall, setActiveHistoryCall] = useState(null);
 
-
   // Call runtime state
   const [status, setStatus] = useState('idle'); // idle, dialing, connected, listening, thinking, speaking, disconnected, error
   const [callActive, setCallActive] = useState(false);
@@ -70,6 +69,7 @@ function App() {
   const micStreamRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const transcriptEndRef = useRef(null);
+  const audioQueueRef = useRef([]);
 
   // Refs for Web Audio API visualizer
   const audioContextRef = useRef(null);
@@ -545,11 +545,15 @@ function App() {
 
   // Play synthetic voice from Base64
   const playAgentAudio = (audioBase64, text) => {
-    // If there is an existing audio, stop it
-    if (audioRef.current) {
-      audioRef.current.pause();
+    if (isSpeakingRef.current) {
+      // Queue the incoming audio chunk
+      audioQueueRef.current.push({ audioBase64, text });
+      return;
     }
+    playNextChunk(audioBase64, text);
+  };
 
+  const playNextChunk = (audioBase64, text) => {
     isSpeakingRef.current = true;
     currentAgentTextRef.current = text;
     userSpokeVADRef.current = false;
@@ -579,30 +583,48 @@ function App() {
     };
 
     audio.onended = () => {
-      isSpeakingRef.current = false;
-      currentAgentTextRef.current = '';
+      // Check queue
+      if (audioQueueRef.current.length > 0) {
+        const next = audioQueueRef.current.shift();
+        playNextChunk(next.audioBase64, next.text);
+      } else {
+        isSpeakingRef.current = false;
+        currentAgentTextRef.current = '';
 
-      // Turn back on Speech Recognition UI state
-      if (callActiveRef.current) {
-        setStatus('listening');
+        // Turn back on Speech Recognition UI state
+        if (callActiveRef.current) {
+          setStatus('listening');
+        }
       }
     };
 
     audio.onerror = (e) => {
       console.error("Audio playback error:", e);
-      isSpeakingRef.current = false;
-      currentAgentTextRef.current = '';
-      if (callActiveRef.current) {
-        setStatus('listening');
+      // Check queue
+      if (audioQueueRef.current.length > 0) {
+        const next = audioQueueRef.current.shift();
+        playNextChunk(next.audioBase64, next.text);
+      } else {
+        isSpeakingRef.current = false;
+        currentAgentTextRef.current = '';
+        if (callActiveRef.current) {
+          setStatus('listening');
+        }
       }
     };
 
     audio.play().catch(e => {
       console.error("Failed to play audio:", e);
-      isSpeakingRef.current = false;
-      currentAgentTextRef.current = '';
-      if (callActiveRef.current) {
-        setStatus('listening');
+      // Check queue
+      if (audioQueueRef.current.length > 0) {
+        const next = audioQueueRef.current.shift();
+        playNextChunk(next.audioBase64, next.text);
+      } else {
+        isSpeakingRef.current = false;
+        currentAgentTextRef.current = '';
+        if (callActiveRef.current) {
+          setStatus('listening');
+        }
       }
     });
   };
@@ -612,6 +634,9 @@ function App() {
     if (!callActiveRef.current || !isSpeakingRef.current) return;
 
     console.log("Barge-in detected: interrupting agent playback...");
+
+    // Clear queue
+    audioQueueRef.current = [];
 
     // Estimate text spoken so far based on current playback ratio
     let textSpoken = "";
@@ -1042,22 +1067,6 @@ function App() {
                   >
                     Groq Cloud
                   </button>
-                </div>
-              </div>
-
-              {/* API Credentials */}
-              <div className="input-group">
-                <label className="input-label">API Credentials</label>
-                <div className="input-with-icon">
-                  <Key className="input-icon" />
-                  <input
-                    type="password"
-                    placeholder={provider === 'gemini' ? "Enter Gemini API Key..." : "Enter Groq API Key..."}
-                    value={provider === 'gemini' ? geminiKey : groqKey}
-                    onChange={(e) => provider === 'gemini' ? setGeminiKey(e.target.value) : setGroqKey(e.target.value)}
-                    className="input-field"
-                    disabled={callActive}
-                  />
                 </div>
               </div>
 
