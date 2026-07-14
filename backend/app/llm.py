@@ -14,26 +14,48 @@ class LLMService:
         self.gemini_client = None
         self.groq_client = None
         self.api_key = api_key
-        
+
+    async def _ensure_client(self):
+        """
+        Ensures the client for the selected provider is initialized.
+        Asynchronously fetches keys from database if not set.
+        """
         if self.provider == "gemini":
+            if self.gemini_client:
+                return
             if not self.api_key:
                 self.api_key = settings.GEMINI_API_KEY
             if not self.api_key:
+                from app.security import get_api_key_from_db
+                self.api_key = await get_api_key_from_db("gemini")
+            
+            if self.api_key:
+                self.gemini_client = genai.Client(api_key=self.api_key)
+            else:
                 logger.warning("GEMINI_API_KEY is not set.")
-            self.gemini_client = genai.Client(api_key=self.api_key)
+                
         elif self.provider == "groq":
+            if self.groq_client:
+                return
             if not self.api_key:
                 self.api_key = settings.GROQ_API_KEY
             if not self.api_key:
+                from app.security import get_api_key_from_db
+                self.api_key = await get_api_key_from_db("groq")
+            
+            if self.api_key:
+                self.groq_client = Groq(api_key=self.api_key)
+            else:
                 logger.warning("GROQ_API_KEY is not set.")
-            self.groq_client = Groq(api_key=self.api_key)
 
     async def get_response(self, history: list, system_prompt: str) -> str:
         """
         Generates LLM completion based on history.
         history format: [{"role": "user"/"assistant", "content": "..."}]
         """
+        await self._ensure_client()
         if not self.api_key:
+            return f"Please configure your {self.provider.upper()}_API_KEY in the environment settings or enter it in the web interface."
             return f"Please configure your {self.provider.upper()}_API_KEY in the environment settings or enter it in the web interface."
 
         try:
@@ -86,6 +108,7 @@ class LLMService:
         """
         Generates LLM completion as an async generator yielding complete sentences.
         """
+        await self._ensure_client()
         if not self.api_key:
             yield f"Please configure your {self.provider.upper()}_API_KEY."
             return
