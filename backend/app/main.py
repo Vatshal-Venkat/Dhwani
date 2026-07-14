@@ -38,7 +38,12 @@ app = FastAPI(title="Outbound Voice Agent API", lifespan=lifespan)
 # Enable CORS for frontend integration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:5174"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -803,11 +808,8 @@ async def websocket_call_endpoint(websocket: WebSocket):
                         })
                 
                 elif msg_type == "speech_start":
-                    logger.info("VAD Speech Start: clearing audio buffer & cancelling current tasks")
+                    logger.info("VAD Speech Start: clearing audio buffer")
                     audio_buffer.clear()
-                    is_agent_speaking = (llm_tts_task and not llm_tts_task.done()) or (turn_monitor_task and not turn_monitor_task.done())
-                    if is_agent_speaking:
-                        await cancel_tasks()
                 
                 elif msg_type == "speech_end":
                     logger.info(f"VAD Speech End: transcribing accumulated {len(audio_buffer)} bytes")
@@ -887,7 +889,14 @@ async def websocket_call_endpoint(websocket: WebSocket):
                                     "status": "listening"
                                 })
                             except asyncio.CancelledError:
-                                pass
+                                try:
+                                    await websocket.send_json({
+                                        "type": "status",
+                                        "status": "listening"
+                                    })
+                                except Exception as e:
+                                    logger.error(f"Failed to reset client status on cancel: {e}")
+                                raise
                             except Exception as e:
                                 logger.error(f"Error in monitor_assistant_turn_call: {e}")
                                 
