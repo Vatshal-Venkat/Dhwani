@@ -7,8 +7,17 @@ logger = logging.getLogger("voice-agent")
 
 class STTService:
     def __init__(self, api_key: str = None):
-        self.api_key = api_key or settings.GROQ_API_KEY
+        self.api_key = api_key
         self.client = None
+
+    async def _ensure_client(self):
+        if self.client:
+            return
+        if not self.api_key:
+            self.api_key = settings.GROQ_API_KEY
+        if not self.api_key:
+            from app.security import get_api_key_from_db
+            self.api_key = await get_api_key_from_db("groq")
         if self.api_key:
             self.client = Groq(api_key=self.api_key)
         else:
@@ -18,12 +27,9 @@ class STTService:
         """
         Transcribes WebM audio bytes to text using Groq's Whisper-large-v3.
         """
+        await self._ensure_client()
         if not self.api_key:
             raise ValueError("GROQ_API_KEY is not set. Please set it in your environment or credentials.")
-
-        if not self.client:
-            self.client = Groq(api_key=self.api_key)
-
         try:
             # Run the synchronous API call in an executor to avoid blocking the main async thread
             import asyncio
