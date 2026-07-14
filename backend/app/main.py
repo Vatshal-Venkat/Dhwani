@@ -14,7 +14,7 @@ from app.config import settings
 from app.llm import LLMService
 from app.tts import TTSService
 from app.database import get_db
-from app.models import Agent, Call
+from app.models import Agent, Call, APIKey
 
 # Logging setup
 logging.basicConfig(level=logging.INFO)
@@ -52,14 +52,55 @@ class ConfigResponse(BaseModel):
     has_groq_key: bool
 
 @app.get("/api/config", response_model=ConfigResponse)
-async def get_config():
+async def get_config(db: AsyncSession = Depends(get_db)):
+    # Check env or database for gemini key
+    has_gemini = bool(settings.GEMINI_API_KEY)
+    if not has_gemini:
+        stmt = select(APIKey).where(APIKey.provider == "gemini")
+        res = await db.execute(stmt)
+        has_gemini = res.scalar_one_or_none() is not None
+
+    # Check env or database for groq key
+    has_groq = bool(settings.GROQ_API_KEY)
+    if not has_groq:
+        stmt = select(APIKey).where(APIKey.provider == "groq")
+        res = await db.execute(stmt)
+        has_groq = res.scalar_one_or_none() is not None
+
     return {
         "provider": settings.LLM_PROVIDER,
         "model": settings.LLM_MODEL,
         "voice": settings.DEFAULT_VOICE,
-        "has_gemini_key": bool(settings.GEMINI_API_KEY),
-        "has_groq_key": bool(settings.GROQ_API_KEY)
+        "has_gemini_key": has_gemini,
+        "has_groq_key": has_groq
     }
+
+class APIKeySave(BaseModel):
+    provider: str
+    api_key: str
+
+@app.post("/api/keys")
+async def save_api_key(data: APIKeySave, db: AsyncSession = Depends(get_db)):
+    if data.provider not in ("gemini", "groq"):
+        raise HTTPException(status_code=400, detail="Invalid provider. Must be 'gemini' or 'groq'.")
+    if not data.api_key.strip():
+        raise HTTPException(status_code=400, detail="API Key cannot be empty.")
+
+    from app.security import encrypt_key
+    encrypted = encrypt_key(data.api_key.strip())
+
+    stmt = select(APIKey).where(APIKey.provider == data.provider)
+    result = await db.execute(stmt)
+    db_key = result.scalar_one_or_none()
+
+    if db_key:
+        db_key.encrypted_key = encrypted
+    else:
+        db_key = APIKey(provider=data.provider, encrypted_key=encrypted)
+        db.add(db_key)
+
+    await db.commit()
+    return {"status": "success", "message": f"API Key for {data.provider} saved successfully."}
 
 @app.get("/api/voices")
 async def get_voices():
@@ -220,8 +261,32 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
     # Audio buffer to accumulate incoming binary audio chunks (PCMU)
     audio_buffer = bytearray()
     
-    # Track the active playback task to support interruption
-    playback_task = None
+    # Queue and tasks for LLM-TTS streaming
+    playback_queue = asyncio.Queue()
+    llm_tts_task = None
+    playback_worker_task = None
+    turn_monitor_task = None
+    
+    # Stats for current turn interruption tracking
+    current_turn_sentences_played = []
+    current_playing_sentence = None
+    current_playing_start_time = None
+
+    # Track overall session cost
+    total_call_cost = 0.0
+
+    def estimate_turn_cost(input_text: str, output_text: str, audio_duration_seconds: float) -> float:
+        stt_cost = audio_duration_seconds * 0.00005  # $0.003 / min = $0.00005 / sec
+        input_tokens = len(input_text) / 4
+        output_tokens = len(output_text) / 4
+        
+        if settings.LLM_PROVIDER == "gemini":
+            llm_cost = (input_tokens * 0.000000075) + (output_tokens * 0.00000030)
+        elif settings.LLM_PROVIDER == "groq":
+            llm_cost = (input_tokens * 0.00000005) + (output_tokens * 0.00000008)
+        else:
+            llm_cost = 0.0
+        return stt_cost + llm_cost
 
     async def stream_audio_to_twilio(mulaw_bytes: bytes):
         nonlocal stream_sid
@@ -245,6 +310,119 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                 logger.error(f"Error sending audio chunk to Twilio: {send_err}")
                 break
             await asyncio.sleep(0.02)
+
+    async def llm_tts_streamer(history, system_prompt, voice):
+        try:
+            # We stream sentences
+            async for sentence in llm_service.get_response_stream(history, system_prompt):
+                if not sentence.strip():
+                    continue
+                logger.info(f"Twilio LLM sentence generated: '{sentence}'")
+                try:
+                    # Generate speech
+                    audio_mp3 = await tts_service.generate_speech(sentence, voice)
+                    decoded = miniaudio.decode(
+                        audio_mp3,
+                        output_format=miniaudio.SampleFormat.SIGNED16,
+                        nchannels=1,
+                        sample_rate=8000
+                    )
+                    mulaw_bytes = pcm_to_mulaw(decoded.samples.tobytes())
+                    await playback_queue.put((sentence, mulaw_bytes))
+                except Exception as tts_err:
+                    logger.error(f"Failed to generate TTS for sentence '{sentence}': {tts_err}")
+        except asyncio.CancelledError:
+            logger.info("llm_tts_streamer cancelled.")
+            raise
+        except Exception as e:
+            logger.error(f"Error in llm_tts_streamer: {e}")
+        finally:
+            await playback_queue.put((None, None))  # Sentinel
+
+    async def playback_worker():
+        nonlocal current_playing_sentence, current_playing_start_time
+        try:
+            while True:
+                item = await playback_queue.get()
+                sentence, mulaw_bytes = item
+                if sentence is None:
+                    break
+                
+                logger.info(f"Twilio starting playback of sentence: '{sentence}'")
+                current_playing_sentence = sentence
+                current_playing_start_time = asyncio.get_event_loop().time()
+                
+                await stream_audio_to_twilio(mulaw_bytes)
+                
+                current_turn_sentences_played.append(sentence)
+                current_playing_sentence = None
+                current_playing_start_time = None
+        except asyncio.CancelledError:
+            logger.info("playback_worker cancelled.")
+            raise
+
+    async def handle_interruption():
+        nonlocal llm_tts_task, playback_worker_task, current_playing_sentence, current_playing_start_time, total_call_cost
+        
+        # 1. Cancel running tasks
+        if llm_tts_task and not llm_tts_task.done():
+            llm_tts_task.cancel()
+        if playback_worker_task and not playback_worker_task.done():
+            playback_worker_task.cancel()
+            
+        # 2. Twilio buffer clear
+        try:
+            await websocket.send_json({
+                "event": "clear",
+                "streamSid": stream_sid
+            })
+        except Exception:
+            pass
+            
+        # 3. Estimate words spoken in the interrupted sentence
+        interrupted_words = ""
+        if current_playing_sentence and current_playing_start_time:
+            elapsed = asyncio.get_event_loop().time() - current_playing_start_time
+            words_spoken_count = int(elapsed * 2.5) # 150 words/min = 2.5 words/sec
+            words = current_playing_sentence.split()
+            if words_spoken_count > 0:
+                interrupted_words = " ".join(words[:words_spoken_count])
+            logger.info(f"Barge-in: Interrupted sentence '{current_playing_sentence}' after {elapsed:.2f}s (~{words_spoken_count} words: '{interrupted_words}')")
+            
+        # 4. Construct truncated response
+        spoken_parts = list(current_turn_sentences_played)
+        if interrupted_words:
+            spoken_parts.append(interrupted_words + "...")
+        elif spoken_parts:
+            spoken_parts[-1] = spoken_parts[-1] + "..."
+        else:
+            spoken_parts.append("...")
+            
+        truncated_response = " ".join(spoken_parts)
+        
+        # Calculate cost for this turn (using truncated text as output)
+        last_user_msg = conversation_history[-1]["content"] if conversation_history else ""
+        turn_cost = estimate_turn_cost(last_user_msg, truncated_response, 0.0)
+        total_call_cost += turn_cost
+        
+        conversation_history.append({
+            "role": "assistant", 
+            "content": truncated_response,
+            "cost": turn_cost
+        })
+        logger.info(f"Interrupted. Added truncated response: '{truncated_response}' (cost: ${turn_cost:.6f})")
+        
+        # Clear stats
+        current_playing_sentence = None
+        current_playing_start_time = None
+        current_turn_sentences_played.clear()
+        
+        # Drain the queue
+        while not playback_queue.empty():
+            try:
+                playback_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
 
     try:
         while True:
@@ -294,12 +472,8 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                     # Speak greeting
                     logger.info(f"Twilio Outbound greeting: '{greeting}', Voice: {voice}")
                     try:
-                        conversation_history.append({"role": "assistant", "content": greeting})
-                        
-                        # Generate TTS
+                        # Generate TTS for greeting
                         audio_mp3 = await tts_service.generate_speech(greeting, voice)
-                        
-                        # Decode and downsample to 8kHz SIGNED16
                         decoded = miniaudio.decode(
                             audio_mp3,
                             output_format=miniaudio.SampleFormat.SIGNED16,
@@ -308,8 +482,33 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                         )
                         mulaw_bytes = pcm_to_mulaw(decoded.samples.tobytes())
                         
-                        # Stream greeting back
-                        playback_task = asyncio.create_task(stream_audio_to_twilio(mulaw_bytes))
+                        # Put greeting audio in queue and sentinel
+                        await playback_queue.put((greeting, mulaw_bytes))
+                        await playback_queue.put((None, None))
+                        
+                        current_turn_sentences_played.clear()
+                        current_playing_sentence = None
+                        current_playing_start_time = None
+                        
+                        playback_worker_task = asyncio.create_task(playback_worker())
+                        
+                        async def monitor_greeting():
+                            nonlocal total_call_cost
+                            try:
+                                await playback_worker_task
+                                # Calculate greeting cost
+                                greet_cost = estimate_turn_cost("", greeting, 0.0)
+                                total_call_cost += greet_cost
+                                conversation_history.append({
+                                    "role": "assistant", 
+                                    "content": greeting,
+                                    "cost": greet_cost
+                                })
+                                logger.info(f"Greeting completed. (cost: ${greet_cost:.6f})")
+                            except asyncio.CancelledError:
+                                pass
+                        turn_monitor_task = asyncio.create_task(monitor_greeting())
+                        
                     except Exception as tts_err:
                         logger.error(f"Failed to generate Twilio greeting TTS: {tts_err}")
                 
@@ -329,18 +528,12 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                         
                         if vad_res["speech_start_detected"]:
                             # Interrupt agent if they are currently speaking
-                            if playback_task and not playback_task.done():
-                                playback_task.cancel()
+                            is_agent_speaking = (playback_worker_task and not playback_worker_task.done()) or (llm_tts_task and not llm_tts_task.done())
+                            if is_agent_speaking:
+                                if turn_monitor_task and not turn_monitor_task.done():
+                                    turn_monitor_task.cancel()
+                                await handle_interruption()
                                 logger.info("Twilio VAD: Interrupted agent playback due to user barge-in")
-                                try:
-                                    await websocket.send_json({
-                                        "event": "clear",
-                                        "streamSid": stream_sid
-                                    })
-                                except Exception:
-                                    pass
-                                if conversation_history and conversation_history[-1]["role"] == "assistant":
-                                    conversation_history[-1]["content"] += "..."
                             
                             audio_buffer.clear()
                             
@@ -357,39 +550,69 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                                 # Convert accumulated PCMU to PCM then WAV
                                 pcm_bytes = mulaw_to_pcm(bytes(audio_buffer))
                                 wav_bytes = pcm_to_wav(pcm_bytes, sample_rate=8000, num_channels=1)
+                                
+                                # Track audio duration for cost calculation
+                                user_audio_duration = len(audio_buffer) / 8000.0
                                 audio_buffer.clear()
                                 
                                 # Transcribe
                                 if not stt_service:
                                     stt_service = STTService()
+                                
+                                stt_start = asyncio.get_event_loop().time()
                                 transcribed_text = await stt_service.transcribe_audio(wav_bytes, filename="speech.wav")
-                                logger.info(f"Twilio Whisper STT: '{transcribed_text}'")
+                                stt_latency = asyncio.get_event_loop().time() - stt_start
+                                logger.info(f"Twilio Whisper STT: '{transcribed_text}' (took {stt_latency:.2f}s)")
                                 
                                 if not transcribed_text.strip():
                                     continue
                                     
-                                conversation_history.append({"role": "user", "content": transcribed_text})
+                                conversation_history.append({
+                                    "role": "user", 
+                                    "content": transcribed_text,
+                                    "metrics": {"stt_latency": round(stt_latency, 3)}
+                                })
                                 
-                                # Query LLM
-                                response_text = await llm_service.get_response(conversation_history, system_prompt)
-                                logger.info(f"Twilio Generated LLM: '{response_text}'")
+                                # Clear queue and previous stats
+                                current_turn_sentences_played.clear()
+                                current_playing_sentence = None
+                                current_playing_start_time = None
                                 
-                                # Generate TTS
-                                audio_mp3 = await tts_service.generate_speech(response_text, voice)
-                                decoded = miniaudio.decode(
-                                    audio_mp3,
-                                    output_format=miniaudio.SampleFormat.SIGNED16,
-                                    nchannels=1,
-                                    sample_rate=8000
-                                )
-                                mulaw_bytes = pcm_to_mulaw(decoded.samples.tobytes())
+                                # Drain queue
+                                while not playback_queue.empty():
+                                    try:
+                                        playback_queue.get_nowait()
+                                    except asyncio.QueueEmpty:
+                                        break
                                 
-                                conversation_history.append({"role": "assistant", "content": response_text})
+                                # Start streamer and player tasks
+                                llm_tts_task = asyncio.create_task(llm_tts_streamer(conversation_history, system_prompt, voice))
+                                playback_worker_task = asyncio.create_task(playback_worker())
                                 
-                                # Play response
-                                if playback_task and not playback_task.done():
-                                    playback_task.cancel()
-                                playback_task = asyncio.create_task(stream_audio_to_twilio(mulaw_bytes))
+                                # Monitor the completion of the assistant turn
+                                async def monitor_assistant_turn(stt_dur):
+                                    nonlocal total_call_cost
+                                    try:
+                                        await asyncio.gather(llm_tts_task, playback_worker_task)
+                                        # Complete successfully
+                                        full_response = " ".join(current_turn_sentences_played)
+                                        
+                                        # Calculate cost
+                                        turn_cost = estimate_turn_cost(transcribed_text, full_response, stt_dur)
+                                        total_call_cost += turn_cost
+                                        
+                                        conversation_history.append({
+                                            "role": "assistant", 
+                                            "content": full_response,
+                                            "cost": turn_cost
+                                        })
+                                        logger.info(f"Assistant turn completed. Response: '{full_response}' (cost: ${turn_cost:.6f})")
+                                    except asyncio.CancelledError:
+                                        pass
+                                    except Exception as e:
+                                        logger.error(f"Error in monitor_assistant_turn: {e}")
+                                
+                                turn_monitor_task = asyncio.create_task(monitor_assistant_turn(user_audio_duration))
                                 
                             except Exception as err:
                                 logger.error(f"Twilio error in STT/LLM/TTS processing: {err}")
@@ -403,9 +626,13 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.error(f"Unhandled Twilio WebSocket error: {e}")
     finally:
-        # Cancel active playback task
-        if playback_task and not playback_task.done():
-            playback_task.cancel()
+        # Cancel tasks
+        if llm_tts_task and not llm_tts_task.done():
+            llm_tts_task.cancel()
+        if playback_worker_task and not playback_worker_task.done():
+            playback_worker_task.cancel()
+        if turn_monitor_task and not turn_monitor_task.done():
+            turn_monitor_task.cancel()
             
         logger.info("Twilio WebSocket session cleaned up")
         
@@ -420,11 +647,11 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                         duration=duration,
                         status="completed",
                         transcription_log=json.dumps(conversation_history),
-                        cost=0.0
+                        cost=round(total_call_cost, 5)
                     )
                     session.add(db_call)
                     await session.commit()
-                    logger.info("Twilio Call successfully logged to database.")
+                    logger.info(f"Twilio Call successfully logged to database. Cost: ${total_call_cost:.5f}")
             except Exception as db_err:
                 logger.error(f"Failed to log Twilio call to database: {db_err}")
 
@@ -450,6 +677,64 @@ async def websocket_call_endpoint(websocket: WebSocket):
     # Audio buffer to accumulate incoming binary WebM audio chunks
     audio_buffer = bytearray()
     
+    # Streaming tasks
+    llm_tts_task = None
+    turn_monitor_task = None
+    
+    # Current turn tracking
+    current_turn_sentences_generated = []
+    
+    # Cost tracking
+    total_call_cost = 0.0
+    
+    def estimate_turn_cost(input_text: str, output_text: str, audio_duration_seconds: float) -> float:
+        stt_cost = audio_duration_seconds * 0.00005  # $0.003 / min
+        input_tokens = len(input_text) / 4
+        output_tokens = len(output_text) / 4
+        
+        prov = llm_service.provider if llm_service else settings.LLM_PROVIDER
+        if prov == "gemini":
+            llm_cost = (input_tokens * 0.000000075) + (output_tokens * 0.00000030)
+        elif prov == "groq":
+            llm_cost = (input_tokens * 0.00000005) + (output_tokens * 0.00000008)
+        else:
+            llm_cost = 0.0
+        return stt_cost + llm_cost
+
+    async def cancel_tasks():
+        nonlocal llm_tts_task, turn_monitor_task
+        if llm_tts_task and not llm_tts_task.done():
+            llm_tts_task.cancel()
+        if turn_monitor_task and not turn_monitor_task.done():
+            turn_monitor_task.cancel()
+
+    async def llm_tts_streamer_call(history, system_prompt, voice):
+        try:
+            async for sentence in llm_service.get_response_stream(history, system_prompt):
+                if not sentence.strip():
+                    continue
+                logger.info(f"Browser LLM sentence generated: '{sentence}'")
+                try:
+                    # Generate speech
+                    audio_bytes = await tts_service.generate_speech(sentence, voice)
+                    audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
+                    
+                    current_turn_sentences_generated.append(sentence)
+                    
+                    # Immediately send to browser
+                    await websocket.send_json({
+                        "type": "agent_speech",
+                        "text": sentence,
+                        "audio": audio_base64
+                    })
+                except Exception as tts_err:
+                    logger.error(f"Failed browser TTS for sentence '{sentence}': {tts_err}")
+        except asyncio.CancelledError:
+            logger.info("Browser llm_tts_streamer_call cancelled.")
+            raise
+        except Exception as e:
+            logger.error(f"Error in browser llm_tts_streamer_call: {e}")
+
     try:
         while True:
             # Accept both text and binary messages
@@ -493,8 +778,16 @@ async def websocket_call_endpoint(websocket: WebSocket):
                         audio_bytes = await tts_service.generate_speech(greeting, voice)
                         audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
                         
+                        # Calculate greeting cost
+                        greet_cost = estimate_turn_cost("", greeting, 0.0)
+                        total_call_cost += greet_cost
+                        
                         # Update history
-                        conversation_history.append({"role": "assistant", "content": greeting})
+                        conversation_history.append({
+                            "role": "assistant", 
+                            "content": greeting,
+                            "cost": greet_cost
+                        })
                         
                         await websocket.send_json({
                             "type": "call_started",
@@ -510,8 +803,11 @@ async def websocket_call_endpoint(websocket: WebSocket):
                         })
                 
                 elif msg_type == "speech_start":
-                    logger.info("VAD Speech Start: clearing audio buffer")
+                    logger.info("VAD Speech Start: clearing audio buffer & cancelling current tasks")
                     audio_buffer.clear()
+                    is_agent_speaking = (llm_tts_task and not llm_tts_task.done()) or (turn_monitor_task and not turn_monitor_task.done())
+                    if is_agent_speaking:
+                        await cancel_tasks()
                 
                 elif msg_type == "speech_end":
                     logger.info(f"VAD Speech End: transcribing accumulated {len(audio_buffer)} bytes")
@@ -530,8 +826,14 @@ async def websocket_call_endpoint(websocket: WebSocket):
                         if not stt_service:
                             stt_service = STTService()
                             
+                        user_audio_duration = len(audio_buffer) / 16000.0  # WebM raw capture is 16kHz float converted to WAV PCM
+                        
+                        stt_start = asyncio.get_event_loop().time()
                         transcribed_text = await stt_service.transcribe_audio(bytes(audio_buffer), filename="speech.wav")
-                        logger.info(f"Groq Whisper Transcription: '{transcribed_text}'")
+                        stt_latency = asyncio.get_event_loop().time() - stt_start
+                        logger.info(f"Groq Whisper Transcription: '{transcribed_text}' (took {stt_latency:.2f}s)")
+                        
+                        audio_buffer.clear()
                         
                         if not transcribed_text.strip():
                             logger.info("Speech was silent or untranscribable. Returning to listening.")
@@ -549,25 +851,48 @@ async def websocket_call_endpoint(websocket: WebSocket):
                         })
                         
                         # Add user transcript to history
-                        conversation_history.append({"role": "user", "content": transcribed_text})
-                        
-                        # Generate Response
-                        response_text = await llm_service.get_response(conversation_history, system_prompt)
-                        logger.info(f"Generated LLM Response: '{response_text}'")
-                        
-                        # Synthesize speech
-                        tts_bytes = await tts_service.generate_speech(response_text, voice)
-                        tts_base64 = base64.b64encode(tts_bytes).decode("utf-8")
-                        
-                        # Add agent response to history
-                        conversation_history.append({"role": "assistant", "content": response_text})
-                        
-                        # Return to client
-                        await websocket.send_json({
-                            "type": "agent_speech",
-                            "text": response_text,
-                            "audio": tts_base64
+                        conversation_history.append({
+                            "role": "user", 
+                            "content": transcribed_text,
+                            "metrics": {"stt_latency": round(stt_latency, 3)}
                         })
+                        
+                        # Clear previous turn stats
+                        current_turn_sentences_generated.clear()
+                        await cancel_tasks()
+                        
+                        # Start streamer and player monitor
+                        llm_tts_task = asyncio.create_task(llm_tts_streamer_call(conversation_history, system_prompt, voice))
+                        
+                        async def monitor_assistant_turn_call(stt_dur, user_speech_text):
+                            nonlocal total_call_cost
+                            try:
+                                await llm_tts_task
+                                full_response = " ".join(current_turn_sentences_generated)
+                                
+                                # Calculate cost
+                                turn_cost = estimate_turn_cost(user_speech_text, full_response, stt_dur)
+                                total_call_cost += turn_cost
+                                
+                                conversation_history.append({
+                                    "role": "assistant", 
+                                    "content": full_response,
+                                    "cost": turn_cost
+                                })
+                                logger.info(f"Browser call turn completed. Response: '{full_response}' (cost: ${turn_cost:.6f})")
+                                
+                                # Return status to client
+                                await websocket.send_json({
+                                    "type": "status",
+                                    "status": "listening"
+                                })
+                            except asyncio.CancelledError:
+                                pass
+                            except Exception as e:
+                                logger.error(f"Error in monitor_assistant_turn_call: {e}")
+                                
+                        turn_monitor_task = asyncio.create_task(monitor_assistant_turn_call(user_audio_duration, transcribed_text))
+                        
                     except Exception as err:
                         logger.error(f"Error during audio transcription or agent response: {err}")
                         await websocket.send_json({
@@ -600,7 +925,15 @@ async def websocket_call_endpoint(websocket: WebSocket):
                         audio_bytes = await tts_service.generate_speech(response_text, voice)
                         audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
                         
-                        conversation_history.append({"role": "assistant", "content": response_text})
+                        # Calculate cost
+                        turn_cost = estimate_turn_cost(user_text, response_text, 0.0)
+                        total_call_cost += turn_cost
+                        
+                        conversation_history.append({
+                            "role": "assistant", 
+                            "content": response_text,
+                            "cost": turn_cost
+                        })
                         
                         await websocket.send_json({
                             "type": "agent_speech",
@@ -617,13 +950,35 @@ async def websocket_call_endpoint(websocket: WebSocket):
                 
                 elif msg_type == "interrupted":
                     logger.info("Agent was interrupted by user speech (barge-in)")
-                    if conversation_history and conversation_history[-1]["role"] == "assistant":
-                        text_spoken = message.get("text_spoken", "").strip()
-                        if text_spoken:
-                            conversation_history[-1]["content"] = text_spoken + "..."
-                            logger.info(f"Updated assistant history history turn: '{text_spoken}...'")
-                        else:
-                            conversation_history[-1]["content"] = "..."
+                    await cancel_tasks()
+                    
+                    text_spoken = message.get("text_spoken", "").strip()
+                    
+                    spoken_parts = []
+                    if len(current_turn_sentences_generated) > 1:
+                        # Append all but the last sentence (which was interrupted)
+                        spoken_parts.extend(current_turn_sentences_generated[:-1])
+                        
+                    if text_spoken:
+                        spoken_parts.append(text_spoken + "...")
+                    elif spoken_parts:
+                        spoken_parts[-1] = spoken_parts[-1] + "..."
+                    else:
+                        spoken_parts.append("...")
+                        
+                    truncated_response = " ".join(spoken_parts)
+                    
+                    # Calculate cost
+                    last_user_msg = conversation_history[-1]["content"] if conversation_history else ""
+                    turn_cost = estimate_turn_cost(last_user_msg, truncated_response, 0.0)
+                    total_call_cost += turn_cost
+                    
+                    conversation_history.append({
+                        "role": "assistant", 
+                        "content": truncated_response,
+                        "cost": turn_cost
+                    })
+                    logger.info(f"Browser interrupted. Added truncated response: '{truncated_response}' (cost: ${turn_cost:.6f})")
                             
                 elif msg_type == "hang_up":
                     logger.info("Client hung up call session")
@@ -642,6 +997,9 @@ async def websocket_call_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.error(f"Unhandled WebSocket error: {e}")
     finally:
+        # Cancel active tasks
+        await cancel_tasks()
+        
         logger.info("WebSocket session cleaned up")
         if conversation_history:
             duration = int((datetime.now() - start_time).total_seconds())
@@ -653,10 +1011,10 @@ async def websocket_call_endpoint(websocket: WebSocket):
                         duration=duration,
                         status="completed",
                         transcription_log=json.dumps(conversation_history),
-                        cost=0.0
+                        cost=round(total_call_cost, 5)
                     )
                     session.add(db_call)
                     await session.commit()
-                    logger.info("Call successfully logged to database.")
+                    logger.info(f"Call successfully logged to database. Cost: ${total_call_cost:.5f}")
             except Exception as db_err:
                 logger.error(f"Failed to log call to database: {db_err}")
