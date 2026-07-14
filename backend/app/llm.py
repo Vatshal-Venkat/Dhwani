@@ -6,6 +6,60 @@ import logging
 
 logger = logging.getLogger("voice-agent")
 
+def split_buffer_into_sentences(buffer: str) -> tuple[list[str], str]:
+    """
+    Splits the buffer into completed sentences, bypassing common abbreviations.
+    Returns (completed_sentences, remaining_buffer).
+    """
+    sentence_endings = {'.', '!', '?'}
+    abbreviations = {
+        'mr', 'mrs', 'ms', 'dr', 'prof', 'sr', 'jr',
+        'eg', 'ie', 'etc', 'vs', 'approx', 'apt', 'dept', 'est', 'temp',
+        'a.m', 'p.m', 'st', 'inc', 'co', 'ltd'
+    }
+    
+    sentences = []
+    i = 0
+    start_idx = 0
+    
+    while i < len(buffer):
+        char = buffer[i]
+        if char in sentence_endings:
+            is_split = True
+            
+            # Case 1: Decimals / digits (e.g. "3.14" or "10.00")
+            if char == '.' and i > 0 and i + 1 < len(buffer):
+                if buffer[i-1].isdigit() and buffer[i+1].isdigit():
+                    is_split = False
+            
+            # Case 2: Abbreviations
+            if is_split and char == '.' and i > 0:
+                # Find the word preceding the period
+                word_start = i - 1
+                while word_start > start_idx and not buffer[word_start].isspace():
+                    word_start -= 1
+                
+                word = buffer[word_start:i].strip().lower()
+                word = word.lstrip('("-\'')
+                
+                if word in abbreviations:
+                    is_split = False
+                elif '.' in word:
+                    is_split = False
+            
+            # Case 3: Check if followed by whitespace or end of buffer
+            if is_split:
+                if i + 1 == len(buffer) or buffer[i+1].isspace():
+                    sentence = buffer[start_idx:i+1].strip()
+                    if sentence:
+                        sentences.append(sentence)
+                    start_idx = i + 1
+        i += 1
+        
+    remaining_buffer = buffer[start_idx:]
+    return sentences, remaining_buffer
+
+
 class LLMService:
     def __init__(self, provider: str = None, model: str = None, api_key: str = None):
         self.provider = provider or settings.LLM_PROVIDER
@@ -115,7 +169,6 @@ class LLMService:
 
         try:
             sentence_buffer = ""
-            sentence_endings = {'.', '!', '?'}
 
             if self.provider == "gemini":
                 model_name = self.model if "gemini" in self.model else "gemini-3.5-flash"
@@ -141,20 +194,9 @@ class LLMService:
                 for chunk in response_stream:
                     if chunk.text:
                         sentence_buffer += chunk.text
-                        while True:
-                            first_ending_idx = -1
-                            for i, char in enumerate(sentence_buffer):
-                                if char in sentence_endings:
-                                    if i + 1 == len(sentence_buffer) or sentence_buffer[i + 1].isspace():
-                                        first_ending_idx = i
-                                        break
-                            if first_ending_idx != -1:
-                                sentence = sentence_buffer[:first_ending_idx + 1].strip()
-                                sentence_buffer = sentence_buffer[first_ending_idx + 1:]
-                                if sentence:
-                                    yield sentence
-                            else:
-                                break
+                        completed_sentences, sentence_buffer = split_buffer_into_sentences(sentence_buffer)
+                        for sentence in completed_sentences:
+                            yield sentence
 
             elif self.provider == "groq":
                 messages = [{"role": "system", "content": system_prompt}]
@@ -172,20 +214,9 @@ class LLMService:
                 for chunk in completion_stream:
                     if chunk.choices[0].delta.content:
                         sentence_buffer += chunk.choices[0].delta.content
-                        while True:
-                            first_ending_idx = -1
-                            for i, char in enumerate(sentence_buffer):
-                                if char in sentence_endings:
-                                    if i + 1 == len(sentence_buffer) or sentence_buffer[i + 1].isspace():
-                                        first_ending_idx = i
-                                        break
-                            if first_ending_idx != -1:
-                                sentence = sentence_buffer[:first_ending_idx + 1].strip()
-                                sentence_buffer = sentence_buffer[first_ending_idx + 1:]
-                                if sentence:
-                                    yield sentence
-                            else:
-                                break
+                        completed_sentences, sentence_buffer = split_buffer_into_sentences(sentence_buffer)
+                        for sentence in completed_sentences:
+                            yield sentence
 
             else:
                 yield f"Unsupported LLM provider: {self.provider}"
