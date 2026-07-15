@@ -2,7 +2,7 @@ import asyncio
 import base64
 import json
 import logging
-from typing import List, Optional
+from typing import Any, List, Optional
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -430,9 +430,9 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
     
     # Queue and tasks for LLM-TTS streaming
     playback_queue = asyncio.Queue()
-    llm_tts_task = None
-    playback_worker_task = None
-    turn_monitor_task = None
+    llm_tts_task: Optional[asyncio.Task[Any]] = None
+    playback_worker_task: Optional[asyncio.Task[Any]] = None
+    turn_monitor_task: Optional[asyncio.Task[Any]] = None
     
     # Stats for current turn interruption tracking
     current_turn_sentences_played = []
@@ -685,7 +685,8 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                         async def monitor_greeting():
                             nonlocal total_call_cost
                             try:
-                                await playback_worker_task
+                                if playback_worker_task is not None:
+                                    await playback_worker_task
                                 # Calculate greeting cost
                                 greet_cost = estimate_turn_cost("", greeting, 0.0)
                                 total_call_cost += greet_cost
@@ -793,7 +794,9 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                                 async def monitor_assistant_turn(stt_dur):
                                     nonlocal total_call_cost
                                     try:
-                                        await asyncio.gather(llm_tts_task, playback_worker_task)
+                                        tasks = [t for t in (llm_tts_task, playback_worker_task) if t is not None]
+                                        if tasks:
+                                            await asyncio.gather(*tasks)
                                         # Complete successfully
                                         full_response = " ".join(current_turn_sentences_played)
                                         
@@ -882,8 +885,8 @@ async def websocket_call_endpoint(websocket: WebSocket):
     audio_buffer = bytearray()
     
     # Streaming tasks
-    llm_tts_task = None
-    turn_monitor_task = None
+    llm_tts_task: Optional[asyncio.Task[Any]] = None
+    turn_monitor_task: Optional[asyncio.Task[Any]] = None
     
     # Current turn tracking
     current_turn_sentences_generated = []
@@ -1079,7 +1082,8 @@ async def websocket_call_endpoint(websocket: WebSocket):
                         async def monitor_assistant_turn_call(stt_dur, user_speech_text):
                             nonlocal total_call_cost
                             try:
-                                await llm_tts_task
+                                if llm_tts_task is not None:
+                                    await llm_tts_task
                                 full_response = " ".join(current_turn_sentences_generated)
                                 
                                 # Calculate cost
