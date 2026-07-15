@@ -24,6 +24,9 @@ class Call(Base):
     status = Column(String(50), default="completed") # e.g. completed, failed, interrupted
     transcription_log = Column(Text, nullable=True) # JSON representation of transcripts
     cost = Column(Float, default=0.0)
+    summary = Column(Text, nullable=True)
+    disposition = Column(String(100), nullable=True)
+    structured_outcome = Column(Text, nullable=True) # JSON string representation
 
 class APIKey(Base):
     __tablename__ = "api_keys"
