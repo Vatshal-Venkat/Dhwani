@@ -111,6 +111,13 @@ class LLMService:
         if not self.api_key:
             return f"Please configure your {self.provider.upper()}_API_KEY in the environment settings or enter it in the web interface."
 
+        if history:
+            system_prompt = system_prompt + (
+                "\n\n[CONVERSATIONAL RULE: You must always respond in the same language that the user spoke to you in their latest message. "
+                "If the user speaks Spanish, reply in Spanish. If they speak English, reply in English. "
+                "Do not translate their query to reply in English if they spoke another language.]"
+            )
+
         try:
             if self.provider == "gemini":
                 model_name = self.model if "gemini" in self.model else "gemini-3.5-flash"
@@ -180,6 +187,13 @@ class LLMService:
         if not self.api_key:
             yield f"Please configure your {self.provider.upper()}_API_KEY."
             return
+
+        if history:
+            system_prompt = system_prompt + (
+                "\n\n[CONVERSATIONAL RULE: You must always respond in the same language that the user spoke to you in their latest message. "
+                "If the user speaks Spanish, reply in Spanish. If they speak English, reply in English. "
+                "Do not translate their query to reply in English if they spoke another language.]"
+            )
 
         try:
             sentence_buffer = ""
