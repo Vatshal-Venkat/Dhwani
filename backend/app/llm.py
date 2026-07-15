@@ -116,6 +116,10 @@ class LLMService:
                 "\n\n[CONVERSATIONAL RULE: You must always respond in the same language that the user spoke to you in their latest message. "
                 "If the user speaks Spanish, reply in Spanish. If they speak English, reply in English. "
                 "Do not translate their query to reply in English if they spoke another language.]"
+                "\n\n[CONVERSATIONAL PACING RULE: You must sound like a natural, polite human during a telephone call. "
+                "1. Use occasional conversational filler words naturally at the beginning of your response to acknowledge the user (e.g., 'Ah, got it.', 'Oh, okay.', 'Hmm, let me check...', 'Sure, I can help with that...'). "
+                "2. Write like you speak. Keep sentences relatively short and use ellipsis '...' to indicate brief natural pauses between ideas. "
+                "3. Avoid robotic transitions or launching immediately into long lists of options without acknowledging what the user just said first.]"
             )
 
         try:
@@ -193,6 +197,10 @@ class LLMService:
                 "\n\n[CONVERSATIONAL RULE: You must always respond in the same language that the user spoke to you in their latest message. "
                 "If the user speaks Spanish, reply in Spanish. If they speak English, reply in English. "
                 "Do not translate their query to reply in English if they spoke another language.]"
+                "\n\n[CONVERSATIONAL PACING RULE: You must sound like a natural, polite human during a telephone call. "
+                "1. Use occasional conversational filler words naturally at the beginning of your response to acknowledge the user (e.g., 'Ah, got it.', 'Oh, okay.', 'Hmm, let me check...', 'Sure, I can help with that...'). "
+                "2. Write like you speak. Keep sentences relatively short and use ellipsis '...' to indicate brief natural pauses between ideas. "
+                "3. Avoid robotic transitions or launching immediately into long lists of options without acknowledging what the user just said first.]"
             )
 
         try:
