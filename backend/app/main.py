@@ -422,6 +422,16 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
     from app.stt import STTService
     stt_service = None
     
+    # Initialize Deepgram real-time STT
+    from app.streaming_stt import DeepgramLiveSTT
+    deepgram_stt = None
+    try:
+        deepgram_stt = DeepgramLiveSTT(sample_rate=8000, encoding="mulaw")
+        await deepgram_stt.connect()
+    except Exception as dg_err:
+        logger.warning(f"Could not connect to Deepgram Live STT, falling back to Groq Whisper: {dg_err}")
+        deepgram_stt = None
+    
     # VAD
     vad = EnergyVAD()
     
@@ -714,6 +724,10 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                             
                         pcm_chunk = base64.b64decode(payload)
                         
+                        # Stream live audio chunk to Deepgram STT
+                        if deepgram_stt:
+                            await deepgram_stt.send_audio(pcm_chunk)
+                        
                         # Pass PCMU bytes through VAD
                         vad_res = vad.process_chunk(pcm_chunk)
                         
@@ -727,6 +741,10 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                                 logger.info("Twilio VAD: Interrupted agent playback due to user barge-in")
                             
                             audio_buffer.clear()
+                            
+                            # Clear Deepgram transcript for the new turn
+                            if deepgram_stt:
+                                deepgram_stt.clear_transcript()
                             
                         if vad.is_speaking:
                             audio_buffer.extend(pcm_chunk)
@@ -746,14 +764,23 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                                 user_audio_duration = len(audio_buffer) / 8000.0
                                 audio_buffer.clear()
                                 
-                                # Transcribe
-                                if not stt_service:
-                                    stt_service = STTService()
-                                
+                                transcribed_text = ""
                                 stt_start = asyncio.get_event_loop().time()
-                                transcribed_text = await stt_service.transcribe_audio(wav_bytes, filename="speech.wav")
-                                stt_latency = asyncio.get_event_loop().time() - stt_start
-                                logger.info(f"Twilio Whisper STT: '{transcribed_text}' (took {stt_latency:.2f}s)")
+                                
+                                # Attempt to retrieve real-time transcript from Deepgram
+                                if deepgram_stt:
+                                    await asyncio.sleep(0.2) # Allow last audio packet processing
+                                    transcribed_text = deepgram_stt.get_transcript()
+                                    stt_latency = asyncio.get_event_loop().time() - stt_start
+                                    logger.info(f"Twilio Deepgram STT: '{transcribed_text}' (took {stt_latency:.2f}s latency)")
+                                    
+                                # Fallback to Groq Whisper if Deepgram is not active or returned empty text
+                                if not transcribed_text.strip():
+                                    if not stt_service:
+                                        stt_service = STTService()
+                                    transcribed_text = await stt_service.transcribe_audio(wav_bytes, filename="speech.wav")
+                                    stt_latency = asyncio.get_event_loop().time() - stt_start
+                                    logger.info(f"Twilio Whisper STT Fallback: '{transcribed_text}' (took {stt_latency:.2f}s)")
                                 
                                 if not transcribed_text.strip():
                                     continue
@@ -836,6 +863,10 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
             playback_worker_task.cancel()
         if turn_monitor_task and not turn_monitor_task.done():
             turn_monitor_task.cancel()
+            
+        # Clean up Deepgram connection
+        if deepgram_stt:
+            await deepgram_stt.close()
             
         logger.info("Twilio WebSocket session cleaned up")
         
