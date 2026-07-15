@@ -422,15 +422,8 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
     from app.stt import STTService
     stt_service = None
     
-    # Initialize Deepgram real-time STT
-    from app.streaming_stt import DeepgramLiveSTT
+    # Initialize Deepgram placeholder
     deepgram_stt = None
-    try:
-        deepgram_stt = DeepgramLiveSTT(sample_rate=8000, encoding="mulaw")
-        await deepgram_stt.connect()
-    except Exception as dg_err:
-        logger.warning(f"Could not connect to Deepgram Live STT, falling back to Groq Whisper: {dg_err}")
-        deepgram_stt = None
     
     # VAD
     vad = EnergyVAD()
@@ -665,6 +658,18 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                         except Exception as db_err:
                             logger.error(f"Failed to retrieve agent configuration from DB: {db_err}")
                     
+                    # Resolve language code from selected voice (e.g. "en-US-Emma..." -> "en")
+                    lang_code = voice.split("-")[0] if voice and "-" in voice else "en"
+                    
+                    # Initialize Deepgram real-time STT
+                    from app.streaming_stt import DeepgramLiveSTT
+                    try:
+                        deepgram_stt = DeepgramLiveSTT(sample_rate=8000, encoding="mulaw", language=lang_code)
+                        await deepgram_stt.connect()
+                    except Exception as dg_err:
+                        logger.warning(f"Could not connect to Deepgram Live STT, falling back to Groq Whisper: {dg_err}")
+                        deepgram_stt = None
+
                     # Initialize LLM and STT using default environment keys
                     llm_service = LLMService(provider=settings.LLM_PROVIDER, model=settings.LLM_MODEL)
                     stt_service = STTService()
@@ -778,7 +783,8 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                                 if not transcribed_text.strip():
                                     if not stt_service:
                                         stt_service = STTService()
-                                    transcribed_text = await stt_service.transcribe_audio(wav_bytes, filename="speech.wav")
+                                    lang_code = voice.split("-")[0] if voice and "-" in voice else "en"
+                                    transcribed_text = await stt_service.transcribe_audio(wav_bytes, filename="speech.wav", language=lang_code)
                                     stt_latency = asyncio.get_event_loop().time() - stt_start
                                     logger.info(f"Twilio Whisper STT Fallback: '{transcribed_text}' (took {stt_latency:.2f}s)")
                                 
@@ -1065,7 +1071,8 @@ async def websocket_call_endpoint(websocket: WebSocket):
                         user_audio_duration = len(audio_buffer) / 16000.0  # WebM raw capture is 16kHz float converted to WAV PCM
                         
                         stt_start = asyncio.get_event_loop().time()
-                        transcribed_text = await stt_service.transcribe_audio(bytes(audio_buffer), filename="speech.wav")
+                        lang_code = voice.split("-")[0] if voice and "-" in voice else "en"
+                        transcribed_text = await stt_service.transcribe_audio(bytes(audio_buffer), filename="speech.wav", language=lang_code)
                         stt_latency = asyncio.get_event_loop().time() - stt_start
                         logger.info(f"Groq Whisper Transcription: '{transcribed_text}' (took {stt_latency:.2f}s)")
                         

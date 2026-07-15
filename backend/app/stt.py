@@ -28,9 +28,9 @@ class STTService:
         else:
             logger.warning("GROQ_API_KEY is not configured. STT service will fail unless a key is provided dynamically.")
 
-    async def transcribe_audio(self, audio_bytes: bytes, filename: str = "speech.webm") -> str:
+    async def transcribe_audio(self, audio_bytes: bytes, filename: str = "speech.webm", language: str = None) -> str:
         """
-        Transcribes WebM audio bytes to text using Groq's Whisper-large-v3.
+        Transcribes audio bytes to text using Groq's Whisper-large-v3 with optional language lock.
         """
         await self._ensure_client()
         if not self.api_key:
@@ -41,11 +41,14 @@ class STTService:
             audio_file.name = filename
 
             def run_transcribe():
-                response = self.client.audio.transcriptions.create(
-                    file=audio_file,
-                    model="whisper-large-v3",
-                    response_format="text"
-                )
+                kwargs = {
+                    "file": audio_file,
+                    "model": "whisper-large-v3",
+                    "response_format": "text"
+                }
+                if language:
+                    kwargs["language"] = language
+                response = self.client.audio.transcriptions.create(**kwargs)
                 return response
 
             loop = asyncio.get_running_loop()

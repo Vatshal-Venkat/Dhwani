@@ -11,10 +11,11 @@ class DeepgramLiveSTT:
     Manages a live WebSocket connection to Deepgram's real-time streaming STT service.
     Streams raw audio frames dynamically and compiles transcription text with virtually zero latency.
     """
-    def __init__(self, sample_rate: int = 16000, encoding: str = "linear16", api_key: str = None):
+    def __init__(self, sample_rate: int = 16000, encoding: str = "linear16", api_key: str = None, language: str = "en"):
         self.sample_rate = sample_rate
         self.encoding = encoding
         self.api_key = api_key
+        self.language = language or "en"
         self.ws = None
         self.session = None
         self.transcript_parts = []
@@ -43,6 +44,7 @@ class DeepgramLiveSTT:
             f"&channels=1"
             f"&interim_results=true"
             f"&smart_format=true"
+            f"&language={self.language}"
         )
         
         headers = {
