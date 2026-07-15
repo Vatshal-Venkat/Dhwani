@@ -1,9 +1,14 @@
 import io
 import logging
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from groq import Groq
 from app.config import settings
 
 logger = logging.getLogger("voice-agent")
+
+# Persistent shared executor for Whisper STT API calls
+_stt_executor = ThreadPoolExecutor(max_workers=4)
 
 class STTService:
     def __init__(self, api_key: str = None):
@@ -31,10 +36,6 @@ class STTService:
         if not self.api_key:
             raise ValueError("GROQ_API_KEY is not set. Please set it in your environment or credentials.")
         try:
-            # Run the synchronous API call in an executor to avoid blocking the main async thread
-            import asyncio
-            from concurrent.futures import ThreadPoolExecutor
-            
             # Create a file-like object from raw bytes
             audio_file = io.BytesIO(audio_bytes)
             audio_file.name = filename
@@ -48,8 +49,7 @@ class STTService:
                 return response
 
             loop = asyncio.get_running_loop()
-            with ThreadPoolExecutor() as pool:
-                transcript_text = await loop.run_in_executor(pool, run_transcribe)
+            transcript_text = await loop.run_in_executor(_stt_executor, run_transcribe)
             
             return transcript_text.strip()
         except Exception as e:
