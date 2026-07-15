@@ -10,12 +10,13 @@ class TTSService:
 
     async def generate_speech(self, text: str, voice_override: str = None) -> bytes:
         """
-        Synthesize text to speech using edge-tts.
+        Synthesize text to speech using edge-tts with a natural speaking pace.
         Returns bytes of MP3 audio.
         """
         selected_voice = voice_override or self.voice
         try:
-            communicate = edge_tts.Communicate(text, selected_voice)
+            # Slow down TTS by 10% for a highly realistic, human-like cadence over telephone lines
+            communicate = edge_tts.Communicate(text, selected_voice, rate="-10%")
             audio_data = b""
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
