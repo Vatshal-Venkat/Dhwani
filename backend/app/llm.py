@@ -1,6 +1,6 @@
 from google import genai
 from google.genai import types
-from groq import Groq
+from groq import AsyncGroq
 from app.config import settings
 import logging
 
@@ -98,11 +98,11 @@ class LLMService:
                 self.api_key = await get_api_key_from_db("groq")
             
             if self.api_key:
-                self.groq_client = Groq(api_key=self.api_key)
+                self.groq_client = AsyncGroq(api_key=self.api_key)
             else:
                 logger.warning("GROQ_API_KEY is not set.")
 
-    async def get_response(self, history: list, system_prompt: str) -> str:
+    async def get_response(self, history: list, system_prompt: str, json_mode: bool = False) -> str:
         """
         Generates LLM completion based on history.
         history format: [{"role": "user"/"assistant", "content": "..."}]
@@ -110,12 +110,9 @@ class LLMService:
         await self._ensure_client()
         if not self.api_key:
             return f"Please configure your {self.provider.upper()}_API_KEY in the environment settings or enter it in the web interface."
-            return f"Please configure your {self.provider.upper()}_API_KEY in the environment settings or enter it in the web interface."
 
         try:
             if self.provider == "gemini":
-                # Convert standard chat history to Gemini structure
-                # System prompt is passed to generation config or system_instruction
                 model_name = self.model if "gemini" in self.model else "gemini-3.5-flash"
                 
                 # Format history for Gemini
@@ -129,13 +126,29 @@ class LLMService:
                         )
                     )
                 
-                # Generate content using the new SDK
-                response = self.gemini_client.models.generate_content(
+                # If contents is empty, we must pass the prompt inside contents, otherwise pass it as system_instruction
+                if not contents:
+                    contents = system_prompt
+                    if json_mode:
+                        config = types.GenerateContentConfig(response_mime_type="application/json")
+                    else:
+                        config = None
+                else:
+                    if json_mode:
+                        config = types.GenerateContentConfig(
+                            system_instruction=system_prompt,
+                            response_mime_type="application/json"
+                        )
+                    else:
+                        config = types.GenerateContentConfig(
+                            system_instruction=system_prompt
+                        )
+                
+                # Generate content using the new SDK asynchronously
+                response = await self.gemini_client.aio.models.generate_content(
                     model=model_name,
                     contents=contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_prompt
-                    )
+                    config=config
                 )
                 return response.text
                 
@@ -144,11 +157,12 @@ class LLMService:
                 for h in history:
                     messages.append({"role": h["role"], "content": h["content"]})
                 
-                completion = self.groq_client.chat.completions.create(
+                completion = await self.groq_client.chat.completions.create(
                     model=self.model,
                     messages=messages,
                     temperature=0.7,
-                    max_tokens=150
+                    max_tokens=150,
+                    response_format={"type": "json_object"} if json_mode else None
                 )
                 return completion.choices[0].message.content
             
@@ -182,8 +196,8 @@ class LLMService:
                         )
                     )
                 
-                # Using the google-genai generate_content_stream
-                response_stream = self.gemini_client.models.generate_content_stream(
+                # Using the async google-genai generate_content_stream
+                response_stream = await self.gemini_client.aio.models.generate_content_stream(
                     model=model_name,
                     contents=contents,
                     config=types.GenerateContentConfig(
@@ -191,7 +205,7 @@ class LLMService:
                     )
                 )
 
-                for chunk in response_stream:
+                async for chunk in response_stream:
                     if chunk.text:
                         sentence_buffer += chunk.text
                         completed_sentences, sentence_buffer = split_buffer_into_sentences(sentence_buffer)
@@ -203,7 +217,7 @@ class LLMService:
                 for h in history:
                     messages.append({"role": h["role"], "content": h["content"]})
 
-                completion_stream = self.groq_client.chat.completions.create(
+                completion_stream = await self.groq_client.chat.completions.create(
                     model=self.model,
                     messages=messages,
                     temperature=0.7,
@@ -211,7 +225,7 @@ class LLMService:
                     stream=True
                 )
 
-                for chunk in completion_stream:
+                async for chunk in completion_stream:
                     if chunk.choices[0].delta.content:
                         sentence_buffer += chunk.choices[0].delta.content
                         completed_sentences, sentence_buffer = split_buffer_into_sentences(sentence_buffer)
