@@ -138,6 +138,9 @@ class CallResponse(BaseModel):
     status: str
     transcription_log: Optional[str] = None
     cost: float
+    summary: Optional[str] = None
+    disposition: Optional[str] = None
+    structured_outcome: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -209,6 +212,41 @@ async def get_call(call_id: int, db: AsyncSession = Depends(get_db)):
     if not call:
         raise HTTPException(status_code=404, detail="Call log not found")
     return call
+
+
+@app.get("/api/calls/stats")
+async def get_calls_stats(db: AsyncSession = Depends(get_db)):
+    stmt = select(Call)
+    result = await db.execute(stmt)
+    calls = result.scalars().all()
+    
+    total_calls = len(calls)
+    total_cost = sum(c.cost for c in calls if c.cost)
+    avg_duration = sum(c.duration for c in calls if c.duration) / total_calls if total_calls > 0 else 0.0
+    
+    disposition_breakdown = {}
+    interest_level_breakdown = {"High": 0, "Medium": 0, "Low": 0, "None": 0}
+    
+    for c in calls:
+        disp = c.disposition or "Unclassified"
+        disposition_breakdown[disp] = disposition_breakdown.get(disp, 0) + 1
+        
+        if c.structured_outcome:
+            try:
+                outcome = json.loads(c.structured_outcome)
+                interest = outcome.get("interest_level")
+                if interest in interest_level_breakdown:
+                    interest_level_breakdown[interest] += 1
+            except Exception:
+                pass
+                
+    return {
+        "total_calls": total_calls,
+        "total_cost": round(total_cost, 5),
+        "average_duration_seconds": round(avg_duration, 2),
+        "disposition_breakdown": disposition_breakdown,
+        "interest_level_breakdown": interest_level_breakdown
+    }
 
 
 class CallTriggerRequest(BaseModel):
