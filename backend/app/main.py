@@ -211,6 +211,92 @@ async def get_call(call_id: int, db: AsyncSession = Depends(get_db)):
     return call
 
 
+class CallTriggerRequest(BaseModel):
+    phone_number: str
+    agent_id: Optional[int] = None
+    public_url: str
+
+@app.post("/api/calls/trigger")
+async def trigger_call(req: CallTriggerRequest):
+    # Ensure Twilio configurations are set
+    if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN or not settings.TWILIO_FROM_NUMBER:
+        raise HTTPException(
+            status_code=400,
+            detail="Twilio credentials are not configured in settings or .env file."
+        )
+
+    # Clean target phone number
+    to_number = req.phone_number.strip()
+    if not to_number.startswith("+"):
+        to_number = "+" + to_number
+
+    # Construct the twiml URL callback
+    agent_param = f"?agent_id={req.agent_id}" if req.agent_id else ""
+    twiml_url = f"{req.public_url.rstrip('/')}/api/twilio/twiml{agent_param}"
+
+    # Call Twilio REST API to place outbound call using urllib
+    import urllib.request
+    import urllib.parse
+    import base64
+    import json
+    
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{settings.TWILIO_ACCOUNT_SID}/Calls.json"
+    
+    data = {
+        "To": to_number,
+        "From": settings.TWILIO_FROM_NUMBER,
+        "Url": twiml_url,
+        "MachineDetection": "Enable",  # Enabled Twilio Answering Machine Detection (AMD)
+        "MachineDetectionTimeout": "30"
+    }
+    
+    encoded_data = urllib.parse.urlencode(data).encode("utf-8")
+    
+    auth_str = f"{settings.TWILIO_ACCOUNT_SID}:{settings.TWILIO_AUTH_TOKEN}"
+    auth_header = base64.b64encode(auth_str.encode("utf-8")).decode("utf-8")
+    
+    req_obj = urllib.request.Request(
+        url,
+        data=encoded_data,
+        headers={
+            "Authorization": f"Basic {auth_header}",
+            "Content-Type": "application/x-www-form-urlencoded"
+        },
+        method="POST"
+    )
+    
+    try:
+        loop = asyncio.get_running_loop()
+        def send_request():
+            with urllib.request.urlopen(req_obj) as response:
+                return response.read(), response.status
+                
+        res_body, res_status = await loop.run_in_executor(None, send_request)
+        res_json = json.loads(res_body.decode("utf-8"))
+        
+        call_sid = res_json.get("sid")
+        status = res_json.get("status")
+        
+        logger.info(f"Successfully triggered Twilio call. Sid: {call_sid}, Status: {status}")
+        return {
+            "status": "success",
+            "message": "Call initiated successfully",
+            "call_sid": call_sid,
+            "twilio_status": status
+        }
+        
+    except urllib.error.HTTPError as http_err:
+        err_body = http_err.read().decode("utf-8")
+        logger.error(f"Twilio API request failed: {http_err.code} - {err_body}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Twilio API error: {http_err.code} - {err_body}"
+        )
+    except Exception as e:
+        logger.error(f"Error triggering call: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/twilio/twiml")
 async def twilio_twiml(request: Request, agent_id: Optional[str] = None):
     # Construct dynamic WebSocket URL
@@ -219,7 +305,45 @@ async def twilio_twiml(request: Request, agent_id: Optional[str] = None):
     
     form_data = await request.form()
     selected_agent_id = agent_id or form_data.get("agent_id") or ""
+    answered_by = form_data.get("AnsweredBy")
     
+    logger.info(f"Twilio twiml callback. AnsweredBy: {answered_by}, agent_id: {selected_agent_id}")
+    
+    # Check if answered by an answering machine/voicemail
+    is_machine = answered_by in ["machine_start", "machine_end_beep", "machine_end_silence"]
+    
+    if is_machine:
+        # Log the call to database as "voicemail"
+        try:
+            from app.database import AsyncSessionLocal
+            from app.models import Call
+            import json
+            async with AsyncSessionLocal() as session:
+                db_call = Call(
+                    agent_id=int(selected_agent_id) if selected_agent_id.isdigit() else None,
+                    duration=0,
+                    status="completed",
+                    transcription_log=json.dumps([{"role": "system", "content": "Voicemail detected - played automated message"}]),
+                    cost=0.0,
+                    summary="Voicemail detected - played automated message.",
+                    disposition="Voicemail Detected",
+                    structured_outcome=json.dumps({"interest_level": "None", "follow_up_needed": True, "key_points": ["Voicemail detected"]})
+                )
+                session.add(db_call)
+                await session.commit()
+                logger.info(f"Voicemail call successfully logged to database (ID: {db_call.id}).")
+        except Exception as db_err:
+            logger.error(f"Failed to log voicemail call: {db_err}")
+            
+        # Return TwiML response to play a message and hang up
+        twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say>Hello, this is an automated message from SmartHome Solutions. We reached your voicemail. We will call back later. Goodbye.</Say>
+    <Hangup />
+</Response>
+"""
+        return Response(content=twiml, media_type="application/xml")
+        
     ws_url = f"{scheme}://{host}/ws/twilio"
     
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -279,6 +403,7 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
 
     # Track overall session cost
     total_call_cost = 0.0
+    missed_text = ""
 
     def estimate_turn_cost(input_text: str, output_text: str, audio_duration_seconds: float) -> float:
         stt_cost = audio_duration_seconds * 0.00005  # $0.003 / min = $0.00005 / sec
@@ -367,15 +492,26 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
             raise
 
     async def handle_interruption():
-        nonlocal llm_tts_task, playback_worker_task, current_playing_sentence, current_playing_start_time, total_call_cost
+        nonlocal llm_tts_task, playback_worker_task, current_playing_sentence, current_playing_start_time, total_call_cost, missed_text
         
-        # 1. Cancel running tasks
+        # 1. Collect all unspoken text from the queue
+        unspoken_sentences = []
+        while not playback_queue.empty():
+            try:
+                item = playback_queue.get_nowait()
+                sentence, _ = item
+                if sentence:
+                    unspoken_sentences.append(sentence)
+            except asyncio.QueueEmpty:
+                break
+                
+        # 2. Cancel running tasks
         if llm_tts_task and not llm_tts_task.done():
             llm_tts_task.cancel()
         if playback_worker_task and not playback_worker_task.done():
             playback_worker_task.cancel()
             
-        # 2. Twilio buffer clear
+        # 3. Twilio buffer clear
         try:
             await websocket.send_json({
                 "event": "clear",
@@ -384,17 +520,20 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
         except Exception:
             pass
             
-        # 3. Estimate words spoken in the interrupted sentence
+        # 4. Estimate words spoken in the interrupted sentence and what was missed
         interrupted_words = ""
+        missed_current = ""
         if current_playing_sentence and current_playing_start_time:
             elapsed = asyncio.get_event_loop().time() - current_playing_start_time
             words_spoken_count = int(elapsed * 2.5) # 150 words/min = 2.5 words/sec
             words = current_playing_sentence.split()
             if words_spoken_count > 0:
                 interrupted_words = " ".join(words[:words_spoken_count])
+            if words_spoken_count < len(words):
+                missed_current = " ".join(words[words_spoken_count:])
             logger.info(f"Barge-in: Interrupted sentence '{current_playing_sentence}' after {elapsed:.2f}s (~{words_spoken_count} words: '{interrupted_words}')")
             
-        # 4. Construct truncated response
+        # 5. Construct truncated response and missed text
         spoken_parts = list(current_turn_sentences_played)
         if interrupted_words:
             spoken_parts.append(interrupted_words + "...")
@@ -404,6 +543,14 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
             spoken_parts.append("...")
             
         truncated_response = " ".join(spoken_parts)
+        
+        missed_parts = []
+        if missed_current:
+            missed_parts.append(missed_current)
+        missed_parts.extend(unspoken_sentences)
+        missed_text = " ".join(missed_parts).strip()
+        if missed_text:
+            logger.info(f"Twilio Interruption: User missed listening to: '{missed_text}'")
         
         # Calculate cost for this turn (using truncated text as output)
         last_user_msg = conversation_history[-1]["content"] if conversation_history else ""
@@ -590,8 +737,18 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                                     except asyncio.QueueEmpty:
                                         break
                                 
+                                # Inject missed text context into system prompt
+                                dynamic_system_prompt = system_prompt
+                                if missed_text:
+                                    dynamic_system_prompt += (
+                                        f"\n\n[SYSTEM DIRECTIVE: During the previous turn, the user interrupted you. "
+                                        f"You MUST weave the following unspoken information naturally into your next response: '{missed_text}']"
+                                    )
+                                    logger.info(f"Injected Twilio missed text directive: '{missed_text}'")
+                                    missed_text = ""  # Clear after injecting
+                                    
                                 # Start streamer and player tasks
-                                llm_tts_task = asyncio.create_task(llm_tts_streamer(conversation_history, system_prompt, voice))
+                                llm_tts_task = asyncio.create_task(llm_tts_streamer(conversation_history, dynamic_system_prompt, voice))
                                 playback_worker_task = asyncio.create_task(playback_worker())
                                 
                                 # Monitor the completion of the assistant turn
@@ -656,7 +813,11 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                     )
                     session.add(db_call)
                     await session.commit()
-                    logger.info(f"Twilio Call successfully logged to database. Cost: ${total_call_cost:.5f}")
+                    logger.info(f"Twilio Call successfully logged to database (ID: {db_call.id}). Cost: ${total_call_cost:.5f}")
+                    
+                    # Trigger post-call analysis in the background
+                    from app.analytics import summarize_and_update_call
+                    asyncio.create_task(summarize_and_update_call(db_call.id, db_call.transcription_log))
             except Exception as db_err:
                 logger.error(f"Failed to log Twilio call to database: {db_err}")
 
@@ -691,6 +852,7 @@ async def websocket_call_endpoint(websocket: WebSocket):
     
     # Cost tracking
     total_call_cost = 0.0
+    missed_text = ""
     
     def estimate_turn_cost(input_text: str, output_text: str, audio_duration_seconds: float) -> float:
         stt_cost = audio_duration_seconds * 0.00005  # $0.003 / min
@@ -863,8 +1025,18 @@ async def websocket_call_endpoint(websocket: WebSocket):
                         current_turn_sentences_generated.clear()
                         await cancel_tasks()
                         
+                        # Inject missed text if any
+                        dynamic_system_prompt = system_prompt
+                        if missed_text:
+                            dynamic_system_prompt += (
+                                f"\n\n[SYSTEM DIRECTIVE: During the previous turn, the user interrupted you. "
+                                f"You MUST weave the following unspoken information naturally into your next response: '{missed_text}']"
+                            )
+                            logger.info(f"Browser injected missed text directive: '{missed_text}'")
+                            missed_text = ""
+                        
                         # Start streamer and player monitor
-                        llm_tts_task = asyncio.create_task(llm_tts_streamer_call(conversation_history, system_prompt, voice))
+                        llm_tts_task = asyncio.create_task(llm_tts_streamer_call(conversation_history, dynamic_system_prompt, voice))
                         
                         async def monitor_assistant_turn_call(stt_dur, user_speech_text):
                             nonlocal total_call_cost
@@ -926,8 +1098,18 @@ async def websocket_call_endpoint(websocket: WebSocket):
                     })
                     
                     try:
+                        # Inject missed text if any
+                        dynamic_system_prompt = system_prompt
+                        if missed_text:
+                            dynamic_system_prompt += (
+                                f"\n\n[SYSTEM DIRECTIVE: During the previous turn, the user interrupted you. "
+                                f"You MUST weave the following unspoken information naturally into your next response: '{missed_text}']"
+                            )
+                            logger.info(f"Browser injected missed text directive (text fallback): '{missed_text}'")
+                            missed_text = ""
+
                         # Query LLM
-                        response_text = await llm_service.get_response(conversation_history, system_prompt)
+                        response_text = await llm_service.get_response(conversation_history, dynamic_system_prompt)
                         logger.info(f"Generated LLM Response: '{response_text}'")
                         
                         # Synthesize speech
@@ -962,6 +1144,18 @@ async def websocket_call_endpoint(websocket: WebSocket):
                     await cancel_tasks()
                     
                     text_spoken = message.get("text_spoken", "").strip()
+                    
+                    # 1. Determine missed text by subtracting spoken text from full generated response
+                    full_response = " ".join(current_turn_sentences_generated)
+                    clean_spoken = text_spoken.rstrip(".")
+                    idx = full_response.lower().find(clean_spoken.lower())
+                    if idx != -1:
+                        missed_text = full_response[idx + len(clean_spoken):].strip()
+                    else:
+                        missed_text = current_turn_sentences_generated[-1] if current_turn_sentences_generated else ""
+                        
+                    if missed_text:
+                        logger.info(f"Browser Barge-in: User missed listening to: '{missed_text}'")
                     
                     spoken_parts = []
                     if len(current_turn_sentences_generated) > 1:
@@ -1024,6 +1218,10 @@ async def websocket_call_endpoint(websocket: WebSocket):
                     )
                     session.add(db_call)
                     await session.commit()
-                    logger.info(f"Call successfully logged to database. Cost: ${total_call_cost:.5f}")
+                    logger.info(f"Call successfully logged to database (ID: {db_call.id}). Cost: ${total_call_cost:.5f}")
+                    
+                    # Trigger post-call analysis in the background
+                    from app.analytics import summarize_and_update_call
+                    asyncio.create_task(summarize_and_update_call(db_call.id, db_call.transcription_log))
             except Exception as db_err:
                 logger.error(f"Failed to log call to database: {db_err}")
