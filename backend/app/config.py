@@ -20,4 +20,7 @@ class Settings:
     # Deepgram configuration for real-time STT
     DEEPGRAM_API_KEY: str = os.getenv("DEEPGRAM_API_KEY", "")
 
+    # Base public URL for webhook callbacks (e.g. ngrok address)
+    PUBLIC_URL: str = os.getenv("PUBLIC_URL", "")
+
 settings = Settings()
