@@ -437,6 +437,24 @@ function App() {
     };
   }, [callActive]);
 
+  // Helper to determine if user speech is semantic
+  const isSemanticSpeech = (text) => {
+    if (!text) return false;
+    const clean = text.trim().toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"");
+    const words = clean.split(/\s+/).filter(w => w.length > 0);
+    if (words.length === 0) return false;
+    
+    const fillers = new Set([
+      "uh", "uhh", "um", "umm", "hmm", "hm", "ah", "ahh", "oh", "eh",
+      "yes", "yeah", "ok", "okay", "no", "yep", "nope", "sure", "right"
+    ]);
+    
+    if (words.length === 1 && fillers.has(words[0])) {
+      return false;
+    }
+    return true;
+  };
+
   // Initialize Speech Recognition (Web Speech API)
   const initializeSpeechRecognition = () => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -478,6 +496,14 @@ function App() {
 
       if (interimTranscript) {
         setInterimSpeech(interimTranscript);
+      }
+
+      // Check for semantic barge-in
+      if (isSpeakingRef.current && userSpokeVADRef.current) {
+        const textToCheck = interimTranscript || finalTranscript;
+        if (isSemanticSpeech(textToCheck)) {
+          handleBargeIn();
+        }
       }
 
       if (finalTranscript && finalTranscript.trim()) {
@@ -776,13 +802,11 @@ function App() {
               ort.env.wasm.wasmPaths = "/";
             },
             onSpeechStart: () => {
-              console.log("VAD: user speech started");
+              console.log("VAD: user speech started. Awaiting semantic validation...");
               userSpokeVADRef.current = true;
               if (callActiveRef.current) {
-                if (isSpeakingRef.current) {
-                  handleBargeIn();
-                }
-                // Notify backend speech started
+                // Do NOT call handleBargeIn() immediately for semantic barge-in.
+                // It will be triggered by interim SpeechRecognition results instead.
                 if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
                   wsRef.current.send(JSON.stringify({ type: 'speech_start' }));
                 }
