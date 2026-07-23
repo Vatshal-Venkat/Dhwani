@@ -156,3 +156,62 @@ class EnergyVAD:
             "speech_end_detected": speech_end_detected,
             "is_speaking": self.is_speaking
         }
+
+
+async def execute_outbound_call(phone_number: str, agent_id: int | None, public_url: str) -> str:
+    """
+    Plugs into Twilio REST API to place an outbound phone call asynchronously.
+    Returns the call SID on success.
+    """
+    from app.config import settings
+    import urllib.request
+    import urllib.parse
+    import base64
+    import json
+    import asyncio
+
+    if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN or not settings.TWILIO_FROM_NUMBER:
+        raise ValueError("Twilio credentials are not configured in settings or .env file.")
+
+    to_number = phone_number.strip()
+    if not to_number.startswith("+"):
+        to_number = "+" + to_number
+
+    agent_param = f"?agent_id={agent_id}" if agent_id else ""
+    twiml_url = f"{public_url.rstrip('/')}/api/twilio/twiml{agent_param}"
+
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{settings.TWILIO_ACCOUNT_SID}/Calls.json"
+    data = {
+        "To": to_number,
+        "From": settings.TWILIO_FROM_NUMBER,
+        "Url": twiml_url,
+        "MachineDetection": "Enable",
+        "MachineDetectionTimeout": "30"
+    }
+    encoded_data = urllib.parse.urlencode(data).encode("utf-8")
+    auth_str = f"{settings.TWILIO_ACCOUNT_SID}:{settings.TWILIO_AUTH_TOKEN}"
+    auth_header = base64.b64encode(auth_str.encode("utf-8")).decode("utf-8")
+
+    req_obj = urllib.request.Request(
+        url,
+        data=encoded_data,
+        headers={
+            "Authorization": f"Basic {auth_header}",
+            "Content-Type": "application/x-www-form-urlencoded"
+        },
+        method="POST"
+    )
+
+    loop = asyncio.get_running_loop()
+    def send_request():
+        with urllib.request.urlopen(req_obj) as response:
+            return response.read()
+            
+    res_body = await loop.run_in_executor(None, send_request)
+    res_json = json.loads(res_body.decode("utf-8"))
+    
+    call_sid = res_json.get("sid")
+    if not call_sid:
+        raise ValueError(f"Twilio did not return a call SID. Response: {res_json}")
+        
+    return call_sid
