@@ -18,7 +18,7 @@ class Base(DeclarativeBase):
 async def init_db():
     async with engine.begin() as conn:
         # Import models here to register them with Base.metadata before creation
-        from app.models import Agent, Call, APIKey
+        from app.models import Agent, Call, APIKey, ScheduledCall, Booking, Lead
         await conn.run_sync(Base.metadata.create_all)
         
         # Schema migration helper for existing calls table

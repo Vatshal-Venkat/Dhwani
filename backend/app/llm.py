@@ -2,7 +2,10 @@ from google import genai
 from google.genai import types
 from groq import AsyncGroq
 from app.config import settings
+from app.tools import execute_tool, AVAILABLE_TOOLS
 import logging
+import json
+import re
 
 logger = logging.getLogger("voice-agent")
 
@@ -34,7 +37,6 @@ def split_buffer_into_sentences(buffer: str) -> tuple[list[str], str]:
             
             # Case 2: Abbreviations
             if is_split and char == '.' and i > 0:
-                # Find the word preceding the period
                 word_start = i - 1
                 while word_start > start_idx and not buffer[word_start].isspace():
                     word_start -= 1
@@ -102,69 +104,54 @@ class LLMService:
             else:
                 logger.warning("GROQ_API_KEY is not set.")
 
+    def _build_system_prompt(self, base_prompt: str) -> str:
+        """Appends conversational pacing and tool calling capabilities to system prompt."""
+        tool_desc = json.dumps(AVAILABLE_TOOLS, indent=2)
+        prompt = (
+            base_prompt +
+            "\n\n[ACTION EXECUTION ENGINE & TOOL INSTRUCTIONS]\n"
+            "You have access to real-time action tools to create/check appointments and record customer leads.\n"
+            f"Available Tools Schema:\n{tool_desc}\n\n"
+            "When the user requests an action (e.g. checking slots, booking an appointment, registering interest), output a tool execution tag in this exact format:\n"
+            "[ACTION: tool_name({\"param1\": \"val1\", ...})]\n"
+            "If you need to book an appointment or capture a lead, ask for the customer's name and details if missing, or use default details from context.\n"
+            "Do NOT invent false confirmation codes without invoking the create_booking tool."
+            "\n\n[CONVERSATIONAL RULE: You must always respond in the same language that the user spoke to you in their latest message.]"
+            "\n\n[CONVERSATIONAL PACING RULE: You must sound like a natural, polite human during a telephone call. "
+            "1. Use occasional conversational filler words naturally at the beginning of your response to acknowledge the user (e.g., 'Ah, got it.', 'Oh, okay.', 'Hmm, let me check...', 'Sure, I can help with that...'). "
+            "2. Write like you speak. Keep sentences relatively short and use ellipsis '...' to indicate brief natural pauses between ideas.]"
+        )
+        return prompt
+
     async def get_response(self, history: list, system_prompt: str, json_mode: bool = False) -> str:
-        """
-        Generates LLM completion based on history.
-        history format: [{"role": "user"/"assistant", "content": "..."}]
-        """
         await self._ensure_client()
         if not self.api_key:
-            return f"Please configure your {self.provider.upper()}_API_KEY in the environment settings or enter it in the web interface."
+            return f"Please configure your {self.provider.upper()}_API_KEY."
 
-        if history:
-            system_prompt = system_prompt + (
-                "\n\n[CONVERSATIONAL RULE: You must always respond in the same language that the user spoke to you in their latest message. "
-                "If the user speaks Spanish, reply in Spanish. If they speak English, reply in English. "
-                "Do not translate their query to reply in English if they spoke another language.]"
-                "\n\n[CONVERSATIONAL PACING RULE: You must sound like a natural, polite human during a telephone call. "
-                "1. Use occasional conversational filler words naturally at the beginning of your response to acknowledge the user (e.g., 'Ah, got it.', 'Oh, okay.', 'Hmm, let me check...', 'Sure, I can help with that...'). "
-                "2. Write like you speak. Keep sentences relatively short and use ellipsis '...' to indicate brief natural pauses between ideas. "
-                "3. Avoid robotic transitions or launching immediately into long lists of options without acknowledging what the user just said first.]"
-            )
+        full_prompt = self._build_system_prompt(system_prompt)
 
         try:
             if self.provider == "gemini":
                 model_name = self.model if "gemini" in self.model else "gemini-3.5-flash"
-                
-                # Format history for Gemini
                 contents = []
                 for h in history:
                     role = "user" if h["role"] == "user" else "model"
-                    contents.append(
-                        types.Content(
-                            role=role,
-                            parts=[types.Part.from_text(text=h["content"])]
-                        )
-                    )
+                    contents.append(types.Content(role=role, parts=[types.Part.from_text(text=h["content"])]))
                 
-                # If contents is empty, we must pass the prompt inside contents, otherwise pass it as system_instruction
-                if not contents:
-                    contents = system_prompt
-                    if json_mode:
-                        config = types.GenerateContentConfig(response_mime_type="application/json")
-                    else:
-                        config = None
-                else:
-                    if json_mode:
-                        config = types.GenerateContentConfig(
-                            system_instruction=system_prompt,
-                            response_mime_type="application/json"
-                        )
-                    else:
-                        config = types.GenerateContentConfig(
-                            system_instruction=system_prompt
-                        )
+                config = types.GenerateContentConfig(
+                    system_instruction=full_prompt,
+                    response_mime_type="application/json" if json_mode else None
+                )
                 
-                # Generate content using the new SDK asynchronously
                 response = await self.gemini_client.aio.models.generate_content(
                     model=model_name,
                     contents=contents,
                     config=config
                 )
-                return response.text
+                text = response.text or ""
                 
             elif self.provider == "groq":
-                messages = [{"role": "system", "content": system_prompt}]
+                messages = [{"role": "system", "content": full_prompt}]
                 for h in history:
                     messages.append({"role": h["role"], "content": h["content"]})
                 
@@ -172,13 +159,31 @@ class LLMService:
                     model=self.model,
                     messages=messages,
                     temperature=0.7,
-                    max_tokens=150,
+                    max_tokens=250,
                     response_format={"type": "json_object"} if json_mode else None
                 )
-                return completion.choices[0].message.content
-            
+                text = completion.choices[0].message.content or ""
             else:
                 return f"Unsupported LLM provider: {self.provider}"
+
+            # Check if text contains tool action tag
+            action_match = re.search(r'\[ACTION:\s*(\w+)\((.*?)\)\]', text, re.DOTALL)
+            if action_match:
+                func_name = action_match.group(1)
+                raw_args = action_match.group(2)
+                try:
+                    args = json.loads(raw_args)
+                except Exception:
+                    args = {}
+
+                tool_res = await execute_tool(func_name, args)
+                # Re-run LLM with tool result
+                tool_msg = f"[TOOL EXECUTION RESULT]: {json.dumps(tool_res)}"
+                history.append({"role": "assistant", "content": text})
+                history.append({"role": "user", "content": tool_msg})
+                return await self.get_response(history, system_prompt, json_mode)
+
+            return text
         except Exception as e:
             logger.error(f"Error calling LLM provider {self.provider}: {e}")
             return f"Error: Could not retrieve response from {self.provider}. Details: {str(e)}"
@@ -186,56 +191,45 @@ class LLMService:
     async def get_response_stream(self, history: list, system_prompt: str):
         """
         Generates LLM completion as an async generator yielding complete sentences.
+        Intercepts tool execution tags and runs backend tools mid-stream.
         """
         await self._ensure_client()
         if not self.api_key:
             yield f"Please configure your {self.provider.upper()}_API_KEY."
             return
 
-        if history:
-            system_prompt = system_prompt + (
-                "\n\n[CONVERSATIONAL RULE: You must always respond in the same language that the user spoke to you in their latest message. "
-                "If the user speaks Spanish, reply in Spanish. If they speak English, reply in English. "
-                "Do not translate their query to reply in English if they spoke another language.]"
-                "\n\n[CONVERSATIONAL PACING RULE: You must sound like a natural, polite human during a telephone call. "
-                "1. Use occasional conversational filler words naturally at the beginning of your response to acknowledge the user (e.g., 'Ah, got it.', 'Oh, okay.', 'Hmm, let me check...', 'Sure, I can help with that...'). "
-                "2. Write like you speak. Keep sentences relatively short and use ellipsis '...' to indicate brief natural pauses between ideas. "
-                "3. Avoid robotic transitions or launching immediately into long lists of options without acknowledging what the user just said first.]"
-            )
+        full_prompt = self._build_system_prompt(system_prompt)
 
         try:
             sentence_buffer = ""
+            full_text = ""
 
             if self.provider == "gemini":
                 model_name = self.model if "gemini" in self.model else "gemini-3.5-flash"
                 contents = []
                 for h in history:
                     role = "user" if h["role"] == "user" else "model"
-                    contents.append(
-                        types.Content(
-                            role=role,
-                            parts=[types.Part.from_text(text=h["content"])]
-                        )
-                    )
+                    contents.append(types.Content(role=role, parts=[types.Part.from_text(text=h["content"])]))
                 
-                # Using the async google-genai generate_content_stream
                 response_stream = await self.gemini_client.aio.models.generate_content_stream(
                     model=model_name,
                     contents=contents,
-                    config=types.GenerateContentConfig(
-                        system_instruction=system_prompt
-                    )
+                    config=types.GenerateContentConfig(system_instruction=full_prompt)
                 )
 
                 async for chunk in response_stream:
                     if chunk.text:
+                        full_text += chunk.text
                         sentence_buffer += chunk.text
                         completed_sentences, sentence_buffer = split_buffer_into_sentences(sentence_buffer)
                         for sentence in completed_sentences:
-                            yield sentence
+                            # Filter out raw action tag from spoken audio if present
+                            clean_sentence = re.sub(r'\[ACTION:.*?\]', '', sentence).strip()
+                            if clean_sentence:
+                                yield clean_sentence
 
             elif self.provider == "groq":
-                messages = [{"role": "system", "content": system_prompt}]
+                messages = [{"role": "system", "content": full_prompt}]
                 for h in history:
                     messages.append({"role": h["role"], "content": h["content"]})
 
@@ -243,24 +237,48 @@ class LLMService:
                     model=self.model,
                     messages=messages,
                     temperature=0.7,
-                    max_tokens=150,
+                    max_tokens=250,
                     stream=True
                 )
 
                 async for chunk in completion_stream:
                     if chunk.choices[0].delta.content:
-                        sentence_buffer += chunk.choices[0].delta.content
+                        text_chunk = chunk.choices[0].delta.content
+                        full_text += text_chunk
+                        sentence_buffer += text_chunk
                         completed_sentences, sentence_buffer = split_buffer_into_sentences(sentence_buffer)
                         for sentence in completed_sentences:
-                            yield sentence
+                            clean_sentence = re.sub(r'\[ACTION:.*?\]', '', sentence).strip()
+                            if clean_sentence:
+                                yield clean_sentence
 
-            else:
-                yield f"Unsupported LLM provider: {self.provider}"
-
-            # Yield any remaining text
+            # Check remaining text in sentence buffer
             remaining = sentence_buffer.strip()
             if remaining:
-                yield remaining
+                clean_rem = re.sub(r'\[ACTION:.*?\]', '', remaining).strip()
+                if clean_rem:
+                    yield clean_rem
+
+            # Check if a tool execution was triggered in full_text
+            action_match = re.search(r'\[ACTION:\s*(\w+)\((.*?)\)\]', full_text, re.DOTALL)
+            if action_match:
+                func_name = action_match.group(1)
+                raw_args = action_match.group(2)
+                try:
+                    args = json.loads(raw_args)
+                except Exception:
+                    args = {}
+
+                logger.info(f"Executing mid-stream tool call: {func_name}")
+                tool_res = await execute_tool(func_name, args)
+                
+                # Secondary stream turn to verbally communicate tool result
+                updated_history = list(history)
+                updated_history.append({"role": "assistant", "content": f"I will perform this action now. [Executed {func_name}]"})
+                updated_history.append({"role": "user", "content": f"[SYSTEM TOOL EXECUTION SUCCESSFUL]: {json.dumps(tool_res)}. Please inform the user."})
+                
+                async for sec_sentence in self.get_response_stream(updated_history, system_prompt):
+                    yield sec_sentence
 
         except Exception as e:
             logger.error(f"Error streaming from {self.provider}: {e}")

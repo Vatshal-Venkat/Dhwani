@@ -52,3 +52,28 @@ class ScheduledCall(Base):
     error_message: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+class Booking(Base):
+    __tablename__ = "bookings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    customer_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    customer_phone: Mapped[str] = mapped_column(String(50), nullable=False)
+    customer_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    service_type: Mapped[str] = mapped_column(String(100), nullable=False, default="Installation")
+    booking_date: Mapped[str] = mapped_column(String(50), nullable=False) # e.g. "2026-07-25"
+    booking_time: Mapped[str] = mapped_column(String(50), nullable=False) # e.g. "10:00 AM"
+    status: Mapped[str] = mapped_column(String(50), default="confirmed") # e.g. confirmed, cancelled, completed
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+class Lead(Base):
+    __tablename__ = "leads"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    phone: Mapped[str] = mapped_column(String(50), nullable=False)
+    intent: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(50), default="new") # e.g. new, contacted, qualified
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+

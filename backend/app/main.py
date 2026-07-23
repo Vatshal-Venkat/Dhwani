@@ -14,7 +14,8 @@ from app.config import settings
 from app.llm import LLMService
 from app.tts import TTSService
 from app.database import get_db
-from app.models import Agent, Call, APIKey
+from app.models import Agent, Call, APIKey, Booking, Lead
+from app.guardrails import guardrail_service
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("voice-agent")
@@ -1226,6 +1227,27 @@ async def websocket_call_endpoint(websocket: WebSocket):
                             })
                             continue
                         
+                        # Apply Guardrails PII Redaction
+                        sanitized_text, redaction_logs = guardrail_service.sanitize_text(transcribed_text)
+                        if redaction_logs:
+                            await websocket.send_json({
+                                "type": "guardrail_event",
+                                "event": "PII_REDACTED",
+                                "details": redaction_logs
+                            })
+                        
+                        # Apply Guardrails Prompt Injection Check
+                        is_injection, deflection_msg = guardrail_service.check_prompt_injection(sanitized_text)
+                        if is_injection:
+                            await websocket.send_json({
+                                "type": "guardrail_event",
+                                "event": "PROMPT_INJECTION_DEFLECTED",
+                                "details": "Prevented jailbreak attempt."
+                            })
+                            sanitized_text = deflection_msg
+
+                        transcribed_text = sanitized_text
+
                         # Send user transcript back to client for UI logging
                         await websocket.send_json({
                             "type": "user_speech_transcript",
@@ -1469,3 +1491,66 @@ async def websocket_call_endpoint(websocket: WebSocket):
                     asyncio.create_task(summarize_and_update_call(db_call.id, db_call.transcription_log or "[]"))
             except Exception as db_err:
                 logger.error(f"Failed to log call to database: {db_err}")
+
+# --- BOOKINGS & LEADS REST API ENDPOINTS ---
+
+class BookingCreate(BaseModel):
+    customer_name: str
+    customer_phone: str
+    customer_email: Optional[str] = None
+    service_type: str = "SmartHome Installation"
+    booking_date: str
+    booking_time: str
+    notes: Optional[str] = None
+
+@app.get("/api/bookings")
+async def list_bookings(db: AsyncSession = Depends(get_db)):
+    stmt = select(Booking).order_by(Booking.id.desc())
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+@app.post("/api/bookings")
+async def create_booking_api(data: BookingCreate, db: AsyncSession = Depends(get_db)):
+    booking = Booking(
+        customer_name=data.customer_name,
+        customer_phone=data.customer_phone,
+        customer_email=data.customer_email,
+        service_type=data.service_type,
+        booking_date=data.booking_date,
+        booking_time=data.booking_time,
+        notes=data.notes,
+        status="confirmed"
+    )
+    db.add(booking)
+    await db.commit()
+    await db.refresh(booking)
+    return booking
+
+@app.delete("/api/bookings/{booking_id}")
+async def cancel_booking_api(booking_id: int, db: AsyncSession = Depends(get_db)):
+    stmt = select(Booking).where(Booking.id == booking_id)
+    res = await db.execute(stmt)
+    booking = res.scalar_one_or_none()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    booking.status = "cancelled"
+    await db.commit()
+    return {"status": "success", "message": f"Booking #{booking_id} cancelled."}
+
+@app.get("/api/leads")
+async def list_leads(db: AsyncSession = Depends(get_db)):
+    stmt = select(Lead).order_by(Lead.id.desc())
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+@app.delete("/api/leads/{lead_id}")
+async def delete_lead_api(lead_id: int, db: AsyncSession = Depends(get_db)):
+    stmt = select(Lead).where(Lead.id == lead_id)
+    res = await db.execute(stmt)
+    lead = res.scalar_one_or_none()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    await db.delete(lead)
+    await db.commit()
+    return {"status": "success", "message": f"Lead #{lead_id} deleted."}
+
