@@ -52,6 +52,11 @@ function App() {
   const [calls, setCalls] = useState([]);
   const [activeHistoryCall, setActiveHistoryCall] = useState(null);
 
+  // Bookings, Leads, and Guardrail state
+  const [bookings, setBookings] = useState([]);
+  const [leads, setLeads] = useState([]);
+  const [guardrailEvents, setGuardrailEvents] = useState([]);
+
   // Call runtime state
   const [status, setStatus] = useState('idle'); // idle, dialing, connected, listening, thinking, speaking, disconnected, error
   const [callActive, setCallActive] = useState(false);
@@ -286,6 +291,45 @@ function App() {
       }
     } catch (err) {
       console.error("Could not fetch calls", err);
+    }
+  };
+
+  const fetchBookingsAndLeads = async () => {
+    try {
+      const resB = await fetch('http://localhost:8000/api/bookings');
+      if (resB.ok) {
+        const dataB = await resB.json();
+        setBookings(dataB);
+      }
+      const resL = await fetch('http://localhost:8000/api/leads');
+      if (resL.ok) {
+        const dataL = await resL.json();
+        setLeads(dataL);
+      }
+    } catch (err) {
+      console.error("Could not fetch bookings or leads", err);
+    }
+  };
+
+  const handleCancelBooking = async (id) => {
+    try {
+      const res = await fetch(`http://localhost:8000/api/bookings/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        fetchBookingsAndLeads();
+      }
+    } catch (err) {
+      console.error("Failed to cancel booking", err);
+    }
+  };
+
+  const handleDeleteLead = async (id) => {
+    try {
+      const res = await fetch(`http://localhost:8000/api/leads/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        fetchBookingsAndLeads();
+      }
+    } catch (err) {
+      console.error("Failed to delete lead", err);
     }
   };
 
@@ -1041,6 +1085,14 @@ function App() {
             <MessageSquare className="h-4 w-4" />
             Call History
           </button>
+          <button 
+            className={`tab-btn ${activeTab === 'bookings' ? 'active' : ''}`}
+            onClick={() => { setActiveTab('bookings'); fetchBookingsAndLeads(); }}
+            disabled={callActive}
+          >
+            <Calendar className="h-4 w-4" />
+            Bookings & Leads
+          </button>
         </div>
       </header>
 
@@ -1539,6 +1591,116 @@ function App() {
                 <p className="transcript-empty-text">
                   Select a call from the history list to view the full details and transcription log.
                 </p>
+              </div>
+            )}
+          </section>
+      {/* Bookings & Leads Tab */}
+      {activeTab === 'bookings' && (
+        <div className="history-grid" style={{ gap: '20px' }}>
+          {/* Left Column: Appointments */}
+          <section className="glass-panel" style={{ padding: '24px' }}>
+            <div className="panel-header" style={{ marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Calendar className="panel-icon" style={{ color: 'var(--accent-cyan)' }} />
+                <h2 className="panel-title">Confirmed Appointments ({bookings.length})</h2>
+              </div>
+              <button onClick={fetchBookingsAndLeads} className="btn-icon" title="Refresh Bookings">
+                <RefreshCw className="h-4 w-4" />
+              </button>
+            </div>
+
+            {bookings.length === 0 ? (
+              <div className="transcript-empty" style={{ padding: '40px 0' }}>
+                <Calendar className="transcript-empty-icon" style={{ opacity: 0.3 }} />
+                <p className="transcript-empty-text">No active bookings yet. Start a call and ask the agent to book an appointment!</p>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', maxHeight: '550px', overflowY: 'auto' }}>
+                {bookings.map(b => (
+                  <div key={b.id} className="agent-item-card" style={{ padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <h3 style={{ fontSize: '15px', fontWeight: '600', color: 'var(--text-primary)' }}>{b.customer_name}</h3>
+                        <span className={`status-badge-inline ${b.status === 'confirmed' ? 'listening' : 'error'}`} style={{ padding: '2px 8px', fontSize: '10px' }}>
+                          {b.status.toUpperCase()}
+                        </span>
+                      </div>
+                      <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                        📞 {b.customer_phone} • 🛠️ {b.service_type}
+                      </p>
+                      <p style={{ fontSize: '12px', color: 'var(--accent-cyan)', marginTop: '2px', fontWeight: '500' }}>
+                        📅 {b.booking_date} at {b.booking_time}
+                      </p>
+                      {b.notes && (
+                        <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px', fontStyle: 'italic' }}>
+                          "{b.notes}"
+                        </p>
+                      )}
+                    </div>
+                    {b.status === 'confirmed' && (
+                      <button 
+                        onClick={() => handleCancelBooking(b.id)} 
+                        className="btn-icon delete" 
+                        title="Cancel Appointment"
+                        style={{ padding: '8px' }}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* Right Column: Captured Leads */}
+          <section className="glass-panel" style={{ padding: '24px' }}>
+            <div className="panel-header" style={{ marginBottom: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Activity className="panel-icon" style={{ color: 'var(--accent-purple)' }} />
+                <h2 className="panel-title">Captured Sales Leads ({leads.length})</h2>
+              </div>
+              <button onClick={fetchBookingsAndLeads} className="btn-icon" title="Refresh Leads">
+                <RefreshCw className="h-4 w-4" />
+              </button>
+            </div>
+
+            {leads.length === 0 ? (
+              <div className="transcript-empty" style={{ padding: '40px 0' }}>
+                <Activity className="transcript-empty-icon" style={{ opacity: 0.3 }} />
+                <p className="transcript-empty-text">No captured leads recorded yet.</p>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', maxHeight: '550px', overflowY: 'auto' }}>
+                {leads.map(l => (
+                  <div key={l.id} className="agent-item-card" style={{ padding: '16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <h3 style={{ fontSize: '15px', fontWeight: '600', color: 'var(--text-primary)' }}>{l.name}</h3>
+                        <span className="status-badge-inline thinking" style={{ padding: '2px 8px', fontSize: '10px' }}>
+                          LEAD
+                        </span>
+                      </div>
+                      <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                        📞 {l.phone}
+                      </p>
+                      <p style={{ fontSize: '12px', color: 'var(--text-primary)', marginTop: '4px' }}>
+                        <strong>Intent:</strong> {l.intent || 'General Inquiry'}
+                      </p>
+                      <p style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                        Captured: {new Date(l.created_at).toLocaleString()}
+                      </p>
+                    </div>
+                    <button 
+                      onClick={() => handleDeleteLead(l.id)} 
+                      className="btn-icon delete" 
+                      title="Delete Lead"
+                      style={{ padding: '8px' }}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                ))}
               </div>
             )}
           </section>
