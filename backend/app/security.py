@@ -95,4 +95,3 @@ async def get_api_key_from_db(provider: str) -> str:
     except Exception as e:
         logger.error(f"Error fetching API key for {provider} from database: {e}")
     return ""
-
