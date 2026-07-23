@@ -11,11 +11,12 @@ class DeepgramLiveSTT:
     Manages a live WebSocket connection to Deepgram's real-time streaming STT service.
     Streams raw audio frames dynamically and compiles transcription text with virtually zero latency.
     """
-    def __init__(self, sample_rate: int = 16000, encoding: str = "linear16", api_key: str = None, language: str = "en"):
+    def __init__(self, sample_rate: int = 16000, encoding: str = "linear16", api_key: str = None, language: str = "en", on_transcript_received=None):
         self.sample_rate = sample_rate
         self.encoding = encoding
         self.api_key = api_key
         self.language = language or "en"
+        self.on_transcript_received = on_transcript_received
         self.ws = None
         self.session = None
         self.transcript_parts = []
@@ -79,6 +80,12 @@ class DeepgramLiveSTT:
                             logger.info(f"Deepgram Real-time Final chunk: '{transcript}'")
                         else:
                             logger.debug(f"Deepgram Interim chunk: '{transcript}'")
+                        
+                        if self.on_transcript_received:
+                            if asyncio.iscoroutinefunction(self.on_transcript_received):
+                                asyncio.create_task(self.on_transcript_received(transcript, is_final))
+                            else:
+                                self.on_transcript_received(transcript, is_final)
         except asyncio.CancelledError:
             pass
         except Exception as e:
