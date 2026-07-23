@@ -16,12 +16,12 @@ from app.tts import TTSService
 from app.database import get_db
 from app.models import Agent, Call, APIKey
 
-# Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("voice-agent")
 
 from contextlib import asynccontextmanager
 from app.database import init_db
+from app.scheduler import start_scheduler, shutdown_scheduler
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -31,7 +31,20 @@ async def lifespan(app: FastAPI):
         logger.info("Database initialization completed successfully.")
     except Exception as e:
         logger.error(f"Error during database initialization: {e}")
+        
+    # Start background call scheduler
+    try:
+        start_scheduler()
+    except Exception as e:
+        logger.error(f"Failed to start call scheduler: {e}")
+        
     yield
+    
+    # Shutdown scheduler on exit
+    try:
+        shutdown_scheduler()
+    except Exception as e:
+        logger.error(f"Failed to stop call scheduler: {e}")
 
 app = FastAPI(title="Outbound Voice Agent API", lifespan=lifespan)
 
@@ -48,6 +61,52 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def detect_sentiment(text: str) -> str:
+    """
+    Scans the transcribed text for keywords indicating user frustration or anger.
+    Returns 'frustrated' if matched, otherwise 'neutral'.
+    """
+    if not text:
+        return "neutral"
+    
+    frustrated_keywords = {
+        "angry", "annoyed", "annoying", "unacceptable", "wrong", "manager", "cancel", 
+        "stupid", "worst", "terrible", "furious", "hate", "stop calling", "dont call", 
+        "complaint", "ridiculous", "frustrated", "frustrating", "waste of time"
+    }
+    
+    clean_text = text.lower().strip()
+    for kw in frustrated_keywords:
+        if kw in clean_text:
+            return "frustrated"
+            
+    return "neutral"
+
+
+def is_semantic_speech(text: str) -> bool:
+    """
+    Heuristics to determine if the transcribed text is a meaningful semantic thought
+    or just acoustic filler/background noise.
+    """
+    if not text:
+        return False
+        
+    clean_text = text.lower().strip().rstrip(".?!")
+    words = clean_text.split()
+    
+    fillers = {
+        "uh", "uhh", "um", "umm", "hmm", "hm", "ah", "ahh", "oh", "eh", 
+        "cough", "snort", "throat", "sigh", "breath", "noise", "yes", "yeah", 
+        "ok", "okay", "no", "yep", "nope", "sure", "right"
+    }
+    
+    if len(words) == 1 and words[0] in fillers:
+        return False
+        
+    return True
+
 
 class ConfigResponse(BaseModel):
     provider: str
@@ -256,83 +315,125 @@ class CallTriggerRequest(BaseModel):
 
 @app.post("/api/calls/trigger")
 async def trigger_call(req: CallTriggerRequest):
-    # Ensure Twilio configurations are set
-    if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN or not settings.TWILIO_FROM_NUMBER:
-        raise HTTPException(
-            status_code=400,
-            detail="Twilio credentials are not configured in settings or .env file."
-        )
-
-    # Clean target phone number
-    to_number = req.phone_number.strip()
-    if not to_number.startswith("+"):
-        to_number = "+" + to_number
-
-    # Construct the twiml URL callback
-    agent_param = f"?agent_id={req.agent_id}" if req.agent_id else ""
-    twiml_url = f"{req.public_url.rstrip('/')}/api/twilio/twiml{agent_param}"
-
-    # Call Twilio REST API to place outbound call using urllib
-    import urllib.request
-    import urllib.parse
-    import base64
-    import json
-    
-    url = f"https://api.twilio.com/2010-04-01/Accounts/{settings.TWILIO_ACCOUNT_SID}/Calls.json"
-    
-    data = {
-        "To": to_number,
-        "From": settings.TWILIO_FROM_NUMBER,
-        "Url": twiml_url,
-        "MachineDetection": "Enable",  # Enabled Twilio Answering Machine Detection (AMD)
-        "MachineDetectionTimeout": "30"
-    }
-    
-    encoded_data = urllib.parse.urlencode(data).encode("utf-8")
-    
-    auth_str = f"{settings.TWILIO_ACCOUNT_SID}:{settings.TWILIO_AUTH_TOKEN}"
-    auth_header = base64.b64encode(auth_str.encode("utf-8")).decode("utf-8")
-    
-    req_obj = urllib.request.Request(
-        url,
-        data=encoded_data,
-        headers={
-            "Authorization": f"Basic {auth_header}",
-            "Content-Type": "application/x-www-form-urlencoded"
-        },
-        method="POST"
-    )
-    
+    from app.twilio_utils import execute_outbound_call
     try:
-        loop = asyncio.get_running_loop()
-        def send_request():
-            with urllib.request.urlopen(req_obj) as response:
-                return response.read(), response.status
-                
-        res_body, res_status = await loop.run_in_executor(None, send_request)
-        res_json = json.loads(res_body.decode("utf-8"))
-        
-        call_sid = res_json.get("sid")
-        status = res_json.get("status")
-        
-        logger.info(f"Successfully triggered Twilio call. Sid: {call_sid}, Status: {status}")
+        call_sid = await execute_outbound_call(
+            phone_number=req.phone_number,
+            agent_id=req.agent_id,
+            public_url=req.public_url
+        )
         return {
             "status": "success",
             "message": "Call initiated successfully",
-            "call_sid": call_sid,
-            "twilio_status": status
+            "call_sid": call_sid
         }
-        
-    except urllib.error.HTTPError as http_err:
-        err_body = http_err.read().decode("utf-8")
-        logger.error(f"Twilio API request failed: {http_err.code} - {err_body}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Twilio API error: {http_err.code} - {err_body}"
-        )
+    except ValueError as val_err:
+        raise HTTPException(status_code=400, detail=str(val_err))
     except Exception as e:
         logger.error(f"Error triggering call: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class CallScheduleRequest(BaseModel):
+    phone_number: str
+    scheduled_time: datetime
+    agent_id: Optional[int] = None
+    public_url: Optional[str] = None
+
+class ScheduledCallResponse(BaseModel):
+    id: int
+    agent_id: Optional[int] = None
+    phone_number: str
+    scheduled_time: datetime
+    status: str
+    public_url: Optional[str] = None
+    retry_count: int
+    error_message: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+@app.post("/api/calls/schedule", response_model=ScheduledCallResponse)
+async def schedule_call(req: CallScheduleRequest, db: AsyncSession = Depends(get_db)):
+    from datetime import datetime, timezone
+    if req.scheduled_time < datetime.now(req.scheduled_time.tzinfo or timezone.utc):
+        raise HTTPException(status_code=400, detail="Scheduled time must be in the future.")
+        
+    from app.models import ScheduledCall
+    db_scheduled = ScheduledCall(
+        phone_number=req.phone_number.strip(),
+        scheduled_time=req.scheduled_time.astimezone(timezone.utc),
+        agent_id=req.agent_id,
+        public_url=req.public_url or settings.PUBLIC_URL,
+        status="pending"
+    )
+    db.add(db_scheduled)
+    await db.commit()
+    await db.refresh(db_scheduled)
+    return db_scheduled
+
+@app.get("/api/calls/schedule", response_model=List[ScheduledCallResponse])
+async def list_scheduled_calls(db: AsyncSession = Depends(get_db)):
+    from app.models import ScheduledCall
+    stmt = select(ScheduledCall).order_by(ScheduledCall.scheduled_time.asc())
+    result = await db.execute(stmt)
+    return result.scalars().all()
+
+@app.delete("/api/calls/schedule/{id}")
+async def cancel_scheduled_call(id: int, db: AsyncSession = Depends(get_db)):
+    from app.models import ScheduledCall
+    stmt = select(ScheduledCall).where(ScheduledCall.id == id)
+    result = await db.execute(stmt)
+    scheduled_call = result.scalar_one_or_none()
+    if not scheduled_call:
+        raise HTTPException(status_code=404, detail="Scheduled call not found.")
+        
+    if scheduled_call.status not in ("pending", "failed"):
+        raise HTTPException(status_code=400, detail=f"Cannot cancel a call in '{scheduled_call.status}' state.")
+        
+    scheduled_call.status = "cancelled"
+    await db.commit()
+    return {"status": "success", "message": "Scheduled call cancelled successfully."}
+
+@app.post("/api/calls/schedule/{id}/trigger")
+async def force_trigger_scheduled_call(id: int, db: AsyncSession = Depends(get_db)):
+    from app.models import ScheduledCall
+    stmt = select(ScheduledCall).where(ScheduledCall.id == id)
+    result = await db.execute(stmt)
+    scheduled_call = result.scalar_one_or_none()
+    if not scheduled_call:
+        raise HTTPException(status_code=404, detail="Scheduled call not found.")
+        
+    if scheduled_call.status in ("processing", "completed"):
+        raise HTTPException(status_code=400, detail=f"Call is already {scheduled_call.status}.")
+        
+    scheduled_call.status = "processing"
+    await db.commit()
+    
+    from app.twilio_utils import execute_outbound_call
+    try:
+        public_url = scheduled_call.public_url or settings.PUBLIC_URL
+        if not public_url:
+            raise ValueError("Callback public_url is not configured.")
+            
+        call_sid = await execute_outbound_call(
+            phone_number=scheduled_call.phone_number,
+            agent_id=scheduled_call.agent_id,
+            public_url=public_url
+        )
+        scheduled_call.status = "completed"
+        await db.commit()
+        return {
+            "status": "success",
+            "message": "Scheduled call triggered successfully.",
+            "call_sid": call_sid
+        }
+    except Exception as e:
+        scheduled_call.status = "failed"
+        scheduled_call.error_message = str(e)[:250]
+        await db.commit()
+        raise HTTPException(status_code=500, detail=f"Failed triggering scheduled call: {str(e)}")
 
 
 @app.post("/api/twilio/twiml")
@@ -342,10 +443,15 @@ async def twilio_twiml(request: Request, agent_id: Optional[str] = None):
     scheme = "wss" if request.url.scheme == "https" else "ws"
     
     form_data = await request.form()
-    selected_agent_id = agent_id or form_data.get("agent_id") or ""
-    answered_by = form_data.get("AnsweredBy")
+    raw_agent_id = form_data.get("agent_id")
+    agent_id_str = raw_agent_id if isinstance(raw_agent_id, str) else ""
+    selected_agent_id = agent_id or agent_id_str
+
+    raw_answered_by = form_data.get("AnsweredBy")
+    answered_by = raw_answered_by if isinstance(raw_answered_by, str) else ""
     
     logger.info(f"Twilio twiml callback. AnsweredBy: {answered_by}, agent_id: {selected_agent_id}")
+
     
     # Check if answered by an answering machine/voicemail
     is_machine = answered_by in ["machine_start", "machine_end_beep", "machine_end_silence"]
@@ -445,6 +551,7 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
     # Track overall session cost
     total_call_cost = 0.0
     missed_text = ""
+    user_emotion = "neutral"
 
     def estimate_turn_cost(input_text: str, output_text: str, audio_duration_seconds: float) -> float:
         stt_cost = audio_duration_seconds * 0.00005  # $0.003 / min = $0.00005 / sec
@@ -491,7 +598,8 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                 logger.info(f"Twilio LLM sentence generated: '{sentence}'")
                 try:
                     # Generate speech
-                    audio_mp3 = await tts_service.generate_speech(sentence, voice)
+                    rate_override = "-22%" if user_emotion == "frustrated" else "-10%"
+                    audio_mp3 = await tts_service.generate_speech(sentence, voice, rate_override=rate_override)
                     decoded = miniaudio.decode(
                         audio_mp3,
                         output_format=miniaudio.SampleFormat.SIGNED16,
@@ -663,8 +771,28 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                     
                     # Initialize Deepgram real-time STT
                     from app.streaming_stt import DeepgramLiveSTT
+                    
+                    async def on_dg_transcript(transcript: str, is_final: bool):
+                        nonlocal total_call_cost
+                        if not transcript.strip():
+                            return
+                        is_agent_speaking = (playback_worker_task and not playback_worker_task.done()) or (llm_tts_task and not llm_tts_task.done())
+                        if is_agent_speaking:
+                            if is_semantic_speech(transcript):
+                                logger.info(f"Twilio Semantic Barge-In triggered: '{transcript}'")
+                                if turn_monitor_task and not turn_monitor_task.done():
+                                    turn_monitor_task.cancel()
+                                await handle_interruption()
+                            else:
+                                logger.debug(f"Twilio Barge-In ignored filler: '{transcript}'")
+                                
                     try:
-                        deepgram_stt = DeepgramLiveSTT(sample_rate=8000, encoding="mulaw", language=lang_code)
+                        deepgram_stt = DeepgramLiveSTT(
+                            sample_rate=8000, 
+                            encoding="mulaw", 
+                            language=lang_code,
+                            on_transcript_received=on_dg_transcript
+                        )
                         await deepgram_stt.connect()
                     except Exception as dg_err:
                         logger.warning(f"Could not connect to Deepgram Live STT, falling back to Groq Whisper: {dg_err}")
@@ -737,14 +865,9 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                         vad_res = vad.process_chunk(pcm_chunk)
                         
                         if vad_res["speech_start_detected"]:
-                            # Interrupt agent if they are currently speaking
-                            is_agent_speaking = (playback_worker_task and not playback_worker_task.done()) or (llm_tts_task and not llm_tts_task.done())
-                            if is_agent_speaking:
-                                if turn_monitor_task and not turn_monitor_task.done():
-                                    turn_monitor_task.cancel()
-                                await handle_interruption()
-                                logger.info("Twilio VAD: Interrupted agent playback due to user barge-in")
-                            
+                            # Acoustic-only speech start does not interrupt agent on semantic barge-in.
+                            # Interruption is managed by deepgram_stt transcript callback.
+                            logger.info("Twilio VAD: Acoustic speech start detected. Awaiting semantic validation...")
                             audio_buffer.clear()
                             
                             # Clear Deepgram transcript for the new turn
@@ -771,6 +894,8 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                                 
                                 transcribed_text = ""
                                 stt_start = asyncio.get_event_loop().time()
+                                stt_latency = 0.0
+
                                 
                                 # Attempt to retrieve real-time transcript from Deepgram
                                 if deepgram_stt:
@@ -797,6 +922,12 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                                     "metrics": {"stt_latency": round(stt_latency, 3)}
                                 })
                                 
+                                # Check user sentiment and update emotion state
+                                user_sentiment = detect_sentiment(transcribed_text)
+                                if user_sentiment == "frustrated":
+                                    user_emotion = "frustrated"
+                                    logger.info("Detected customer frustration/anger. Slowing down pacing and adapting prompt.")
+                                
                                 # Clear queue and previous stats
                                 current_turn_sentences_played.clear()
                                 current_playing_sentence = None
@@ -811,6 +942,12 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                                 
                                 # Inject missed text context into system prompt
                                 dynamic_system_prompt = system_prompt
+                                if user_emotion == "frustrated":
+                                    dynamic_system_prompt += (
+                                        "\n\n[SYSTEM DIRECTIVE: The user seems frustrated or angry. "
+                                        "You MUST respond with high empathy, apologize if appropriate, "
+                                        "be reassuring, and keep your answer extra concise.]"
+                                    )
                                 if missed_text:
                                     dynamic_system_prompt += (
                                         f"\n\n[SYSTEM DIRECTIVE: During the previous turn, the user interrupted you. "
@@ -895,7 +1032,7 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                     
                     # Trigger post-call analysis in the background
                     from app.analytics import summarize_and_update_call
-                    asyncio.create_task(summarize_and_update_call(db_call.id, db_call.transcription_log))
+                    asyncio.create_task(summarize_and_update_call(db_call.id, db_call.transcription_log or "[]"))
             except Exception as db_err:
                 logger.error(f"Failed to log Twilio call to database: {db_err}")
 
@@ -931,6 +1068,7 @@ async def websocket_call_endpoint(websocket: WebSocket):
     # Cost tracking
     total_call_cost = 0.0
     missed_text = ""
+    user_emotion = "neutral"
     
     def estimate_turn_cost(input_text: str, output_text: str, audio_duration_seconds: float) -> float:
         stt_cost = audio_duration_seconds * 0.00005  # $0.003 / min
@@ -961,7 +1099,8 @@ async def websocket_call_endpoint(websocket: WebSocket):
                 logger.info(f"Browser LLM sentence generated: '{sentence}'")
                 try:
                     # Generate speech
-                    audio_bytes = await tts_service.generate_speech(sentence, voice)
+                    rate_override = "-22%" if user_emotion == "frustrated" else "-10%"
+                    audio_bytes = await tts_service.generate_speech(sentence, voice, rate_override=rate_override)
                     audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
                     
                     current_turn_sentences_generated.append(sentence)
@@ -1100,12 +1239,24 @@ async def websocket_call_endpoint(websocket: WebSocket):
                             "metrics": {"stt_latency": round(stt_latency, 3)}
                         })
                         
+                        # Check user sentiment and update emotion state
+                        user_sentiment = detect_sentiment(transcribed_text)
+                        if user_sentiment == "frustrated":
+                            user_emotion = "frustrated"
+                            logger.info("Browser VAD: Detected customer frustration/anger. Slowing down pacing and adapting prompt.")
+                        
                         # Clear previous turn stats
                         current_turn_sentences_generated.clear()
                         await cancel_tasks()
                         
                         # Inject missed text if any
                         dynamic_system_prompt = system_prompt
+                        if user_emotion == "frustrated":
+                            dynamic_system_prompt += (
+                                "\n\n[SYSTEM DIRECTIVE: The user seems frustrated or angry. "
+                                "You MUST respond with high empathy, apologize if appropriate, "
+                                "be reassuring, and keep your answer extra concise.]"
+                            )
                         if missed_text:
                             dynamic_system_prompt += (
                                 f"\n\n[SYSTEM DIRECTIVE: During the previous turn, the user interrupted you. "
@@ -1177,9 +1328,21 @@ async def websocket_call_endpoint(websocket: WebSocket):
                         "status": "thinking"
                     })
                     
+                    # Check user sentiment and update emotion state
+                    user_sentiment = detect_sentiment(user_text)
+                    if user_sentiment == "frustrated":
+                        user_emotion = "frustrated"
+                        logger.info("Browser Text: Detected customer frustration/anger. Slowing down pacing.")
+                    
                     try:
                         # Inject missed text if any
                         dynamic_system_prompt = system_prompt
+                        if user_emotion == "frustrated":
+                            dynamic_system_prompt += (
+                                "\n\n[SYSTEM DIRECTIVE: The user seems frustrated or angry. "
+                                "You MUST respond with high empathy, apologize if appropriate, "
+                                "be reassuring, and keep your answer extra concise.]"
+                            )
                         if missed_text:
                             dynamic_system_prompt += (
                                 f"\n\n[SYSTEM DIRECTIVE: During the previous turn, the user interrupted you. "
@@ -1193,7 +1356,8 @@ async def websocket_call_endpoint(websocket: WebSocket):
                         logger.info(f"Generated LLM Response: '{response_text}'")
                         
                         # Synthesize speech
-                        audio_bytes = await tts_service.generate_speech(response_text, voice)
+                        rate_override = "-22%" if user_emotion == "frustrated" else "-10%"
+                        audio_bytes = await tts_service.generate_speech(response_text, voice, rate_override=rate_override)
                         audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
                         
                         # Calculate cost
@@ -1302,6 +1466,6 @@ async def websocket_call_endpoint(websocket: WebSocket):
                     
                     # Trigger post-call analysis in the background
                     from app.analytics import summarize_and_update_call
-                    asyncio.create_task(summarize_and_update_call(db_call.id, db_call.transcription_log))
+                    asyncio.create_task(summarize_and_update_call(db_call.id, db_call.transcription_log or "[]"))
             except Exception as db_err:
                 logger.error(f"Failed to log call to database: {db_err}")
