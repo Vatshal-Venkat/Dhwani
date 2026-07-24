@@ -65,7 +65,12 @@ def split_buffer_into_sentences(buffer: str) -> tuple[list[str], str]:
 class LLMService:
     def __init__(self, provider: str = None, model: str = None, api_key: str = None):
         self.provider = provider or settings.LLM_PROVIDER
-        self.model = model or settings.LLM_MODEL
+        raw_model = model or settings.LLM_MODEL
+        if self.provider == "groq" and ("gemini" in raw_model or not raw_model):
+            raw_model = "llama-3.1-8b-instant"
+        elif self.provider == "gemini" and ("llama" in raw_model or "groq" in raw_model or raw_model == "gemini-3.5-flash"):
+            raw_model = "gemini-2.5-flash"
+        self.model = raw_model
         
         self.gemini_client = None
         self.groq_client = None
@@ -132,11 +137,15 @@ class LLMService:
 
         try:
             if self.provider == "gemini":
-                model_name = self.model if "gemini" in self.model else "gemini-3.5-flash"
+                model_name = self.model if "gemini" in self.model else "gemini-2.5-flash"
+                if model_name == "gemini-3.5-flash":
+                    model_name = "gemini-2.5-flash"
                 contents = []
                 for h in history:
                     role = "user" if h["role"] == "user" else "model"
                     contents.append(types.Content(role=role, parts=[types.Part.from_text(text=h["content"])]))
+                if not contents:
+                    contents.append(types.Content(role="user", parts=[types.Part.from_text(text="Analyze the input.")]))
                 
                 config = types.GenerateContentConfig(
                     system_instruction=full_prompt,
@@ -205,11 +214,15 @@ class LLMService:
             full_text = ""
 
             if self.provider == "gemini":
-                model_name = self.model if "gemini" in self.model else "gemini-3.5-flash"
+                model_name = self.model if "gemini" in self.model else "gemini-2.5-flash"
+                if model_name == "gemini-3.5-flash":
+                    model_name = "gemini-2.5-flash"
                 contents = []
                 for h in history:
                     role = "user" if h["role"] == "user" else "model"
                     contents.append(types.Content(role=role, parts=[types.Part.from_text(text=h["content"])]))
+                if not contents:
+                    contents.append(types.Content(role="user", parts=[types.Part.from_text(text="Hello.")]))
                 
                 response_stream = await self.gemini_client.aio.models.generate_content_stream(
                     model=model_name,
