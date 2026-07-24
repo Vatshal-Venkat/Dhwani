@@ -22,7 +22,10 @@ import {
 function App() {
   // Call configuration state
   const [provider, setProvider] = useState(() => localStorage.getItem('llm_provider') || 'gemini');
-  const [model, setModel] = useState(() => localStorage.getItem('llm_model') || 'gemini-3.5-flash');
+  const [model, setModel] = useState(() => {
+    const saved = localStorage.getItem('llm_model');
+    return (saved && saved !== 'gemini-3.5-flash') ? saved : 'gemini-2.5-flash';
+  });
   const [geminiKey, setGeminiKey] = useState(() => localStorage.getItem('gemini_api_key') || '');
   const [groqKey, setGroqKey] = useState(() => localStorage.getItem('groq_api_key') || '');
   const [voice, setVoice] = useState('en-US-EmmaMultilingualNeural');
@@ -34,6 +37,16 @@ function App() {
     "Keep your answers short, professional, and friendly. Speak in 1-2 conversational sentences max."
   );
   const [greeting, setGreeting] = useState("Hi there! This is Alex calling from SmartHome Solutions. Am I speaking with the homeowner?");
+
+  // Microphone Audio Capture & Gain States
+  const [micDevices, setMicDevices] = useState([]);
+  const [selectedMicId, setSelectedMicId] = useState('');
+  const [micGainBoost, setMicGainBoost] = useState(5.0); // 5x software gain boost for quiet laptop mics
+  const [inputText, setInputText] = useState('');
+  const [isRecordingPTT, setIsRecordingPTT] = useState(false);
+  const [micLevel, setMicLevel] = useState(0);
+  const pttMediaRecorderRef = useRef(null);
+  const pttAudioChunksRef = useRef([]);
 
   // Navigation and Database Tab States
   const [activeTab, setActiveTab] = useState('simulator'); // 'simulator' | 'agents' | 'history'
@@ -90,6 +103,8 @@ function App() {
   const isSpeakingRef = useRef(false);
   const currentAgentTextRef = useRef('');
   const userSpokeVADRef = useRef(false);
+  const speechTimerRef = useRef(null);
+  const latestSpeechRef = useRef('');
 
   useEffect(() => {
     callActiveRef.current = callActive;
@@ -106,6 +121,27 @@ function App() {
       transcriptEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [transcripts]);
+
+  // Enumerate microphone input devices on load
+  useEffect(() => {
+    const fetchMicDevices = async () => {
+      if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+        try {
+          // Request permission once to get device labels
+          await navigator.mediaDevices.getUserMedia({ audio: true }).then(s => s.getTracks().forEach(t => t.stop())).catch(() => {});
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const audioInputs = devices.filter(d => d.kind === 'audioinput');
+          setMicDevices(audioInputs);
+          if (audioInputs.length > 0 && !selectedMicId) {
+            setSelectedMicId(audioInputs[0].deviceId);
+          }
+        } catch (e) {
+          console.warn("Could not enumerate mic devices:", e);
+        }
+      }
+    };
+    fetchMicDevices();
+  }, []);
 
   // Visualizer Animation Loop
   useEffect(() => {
@@ -157,7 +193,14 @@ function App() {
           }
           const rms = Math.sqrt(sum / bufferLength);
           // Map rms to volume with a boost for visualization clarity
-          volume = Math.max(0.015, rms * 1.8);
+          volume = Math.max(0.015, rms * 1.8 * (micGainBoost / 5.0));
+
+          if (currentStatus === 'listening') {
+            const calculatedLevel = Math.min(100, Math.round(rms * 100 * micGainBoost));
+            setMicLevel(calculatedLevel);
+          } else {
+            setMicLevel(0);
+          }
         }
       }
 
@@ -499,6 +542,27 @@ function App() {
     return true;
   };
 
+  const sendUserSpeech = (text) => {
+    if (!text || !text.trim()) return;
+    if (speechTimerRef.current) {
+      clearTimeout(speechTimerRef.current);
+      speechTimerRef.current = null;
+    }
+    const cleanText = text.trim();
+    setInterimSpeech('');
+    latestSpeechRef.current = '';
+    addTranscript('user', cleanText);
+    userSpokeVADRef.current = false;
+
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      setStatus('thinking');
+      wsRef.current.send(JSON.stringify({
+        type: 'user_speech',
+        text: cleanText
+      }));
+    }
+  };
+
   // Initialize Speech Recognition (Web Speech API)
   const initializeSpeechRecognition = () => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -508,7 +572,7 @@ function App() {
     }
 
     const recognition = new SpeechRecognition();
-    recognition.continuous = false;
+    recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = 'en-US';
 
@@ -520,13 +584,6 @@ function App() {
     };
 
     recognition.onresult = (event) => {
-      // If the agent is speaking and VAD hasn't detected user speech, ignore the result!
-      // This protects against speaker echo when headphones are not used.
-      if (isSpeakingRef.current && !userSpokeVADRef.current) {
-        console.log("Speech Recognition: Ignored possible agent echo");
-        return;
-      }
-
       let interimTranscript = '';
       let finalTranscript = '';
 
@@ -538,34 +595,35 @@ function App() {
         }
       }
 
-      if (interimTranscript) {
-        setInterimSpeech(interimTranscript);
+      const currentText = (finalTranscript || interimTranscript).trim();
+      if (currentText) {
+        setInterimSpeech(currentText);
+        latestSpeechRef.current = currentText;
       }
 
-      // Check for semantic barge-in
-      if (isSpeakingRef.current && userSpokeVADRef.current) {
-        const textToCheck = interimTranscript || finalTranscript;
-        if (isSemanticSpeech(textToCheck)) {
+      // Check for semantic barge-in if agent is currently speaking
+      if (isSpeakingRef.current && currentText) {
+        if (isSemanticSpeech(currentText)) {
           handleBargeIn();
         }
       }
 
+      // If browser marks result as final, send immediately
       if (finalTranscript && finalTranscript.trim()) {
-        setInterimSpeech('');
-        addTranscript('user', finalTranscript);
-
-        // Reset the VAD user spoke ref since a turn is completed
-        userSpokeVADRef.current = false;
-
-        // Send user transcript to WebSocket backend
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          setStatus('thinking');
-          wsRef.current.send(JSON.stringify({
-            type: 'user_speech',
-            text: finalTranscript
-          }));
-        }
+        sendUserSpeech(finalTranscript);
+        return;
       }
+
+      // Otherwise, set a fast 1-second auto-submit timer on speech silence
+      if (speechTimerRef.current) {
+        clearTimeout(speechTimerRef.current);
+      }
+      speechTimerRef.current = setTimeout(() => {
+        if (latestSpeechRef.current && callActiveRef.current && !isSpeakingRef.current) {
+          console.log("Silence detected (1.0s). Auto-submitting speech:", latestSpeechRef.current);
+          sendUserSpeech(latestSpeechRef.current);
+        }
+      }, 1000);
     };
 
     recognition.onerror = (event) => {
@@ -741,6 +799,54 @@ function App() {
     }
   };
 
+  const handleStartPTT = async () => {
+    if (!callActiveRef.current) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      pttAudioChunksRef.current = [];
+      const mediaRecorder = new MediaRecorder(stream);
+      pttMediaRecorderRef.current = mediaRecorder;
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data.size > 0) pttAudioChunksRef.current.push(e.data);
+      };
+      mediaRecorder.start(100);
+      setIsRecordingPTT(true);
+    } catch (e) {
+      console.error("PTT Mic error:", e);
+      setErrorMessage("Could not capture microphone for Push-To-Talk.");
+    }
+  };
+
+  const handleStopPTT = () => {
+    if (!pttMediaRecorderRef.current || pttMediaRecorderRef.current.state === "inactive") return;
+    setIsRecordingPTT(false);
+    pttMediaRecorderRef.current.stop();
+    pttMediaRecorderRef.current.onstop = async () => {
+      try {
+        const audioBlob = new Blob(pttAudioChunksRef.current, { type: 'audio/webm' });
+        const arrayBuffer = await audioBlob.arrayBuffer();
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && arrayBuffer.byteLength > 0) {
+          setStatus('thinking');
+          wsRef.current.send(arrayBuffer);
+          setTimeout(() => {
+            if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({ type: 'speech_end' }));
+            }
+          }, 50);
+        }
+      } catch (err) {
+        console.error("Error sending PTT audio blob:", err);
+      }
+    };
+  };
+
+  const handleInputTextSubmit = (e) => {
+    e.preventDefault();
+    if (!inputText.trim() || !callActive) return;
+    sendUserSpeech(inputText);
+    setInputText('');
+  };
+
   // Start the call
   const handleStartCall = () => {
     setErrorMessage('');
@@ -749,6 +855,18 @@ function App() {
     setCallActive(true);
     isSpeakingRef.current = false;
     userSpokeVADRef.current = false;
+
+    // Start Web Speech Recognition as primary/fallback STT engine
+    try {
+      const rec = initializeSpeechRecognition();
+      if (rec) {
+        recognitionRef.current = rec;
+        rec.start();
+        console.log("Web Speech Recognition engine started successfully.");
+      }
+    } catch (e) {
+      console.warn("Could not start Web Speech Recognition API:", e);
+    }
 
     // Initialize Web Audio API for visualizer
     try {
@@ -815,19 +933,31 @@ function App() {
       return wavBytes.buffer;
     };
 
-    // Set up microphone capture and VAD for streaming
-    navigator.mediaDevices.getUserMedia({ audio: true })
+    // Set up microphone capture with auto gain, noise suppression and GainNode amplification
+    const audioConstraints = {
+      audio: {
+        deviceId: selectedMicId ? { exact: selectedMicId } : undefined,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    };
+
+    navigator.mediaDevices.getUserMedia(audioConstraints)
       .then((stream) => {
         micStreamRef.current = stream;
 
-        // Connect mic stream to mic analyser
+        // Connect mic stream to mic analyser through a 5x GainNode amplifier
         if (audioContextRef.current && micAnalyserRef.current) {
           try {
             if (audioContextRef.current.state === 'suspended') {
               audioContextRef.current.resume();
             }
             const micSource = audioContextRef.current.createMediaStreamSource(stream);
-            micSource.connect(micAnalyserRef.current);
+            const gainNode = audioContextRef.current.createGain();
+            gainNode.gain.value = micGainBoost; // Apply software mic gain boost
+            micSource.connect(gainNode);
+            gainNode.connect(micAnalyserRef.current);
           } catch (e) {
             console.error("Error connecting mic stream to analyser:", e);
           }
@@ -1130,7 +1260,7 @@ function App() {
                 <label className="input-label">LLM Provider</label>
                 <div className="provider-toggle-grid">
                   <button
-                    onClick={() => { setProvider('gemini'); setModel('gemini-3.5-flash'); }}
+                    onClick={() => { setProvider('gemini'); setModel('gemini-2.5-flash'); }}
                     className={`btn-toggle ${provider === 'gemini' ? 'active' : ''}`}
                     disabled={callActive || selectedAgentId !== 'custom'}
                   >
@@ -1144,6 +1274,42 @@ function App() {
                     Groq Cloud
                   </button>
                 </div>
+              </div>
+
+              {/* Microphone Device & Gain Boost Settings */}
+              {micDevices.length > 0 && (
+                <div className="input-group">
+                  <label className="input-label">Microphone Device</label>
+                  <select
+                    value={selectedMicId}
+                    onChange={(e) => setSelectedMicId(e.target.value)}
+                    className="input-field"
+                    disabled={callActive}
+                  >
+                    {micDevices.map(d => (
+                      <option key={d.deviceId} value={d.deviceId}>
+                        {d.label || `Microphone (${d.deviceId.slice(0, 8)}...)`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div className="input-group">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <label className="input-label">Mic Gain Amplifier Boost</label>
+                  <span style={{ fontSize: '0.8rem', color: 'var(--accent-cyan)', fontWeight: 'bold' }}>{micGainBoost}x</span>
+                </div>
+                <input
+                  type="range"
+                  min="1.0"
+                  max="10.0"
+                  step="0.5"
+                  value={micGainBoost}
+                  onChange={(e) => setMicGainBoost(parseFloat(e.target.value))}
+                  style={{ width: '100%', accentColor: 'var(--accent-cyan)', cursor: 'pointer' }}
+                  disabled={callActive}
+                />
               </div>
 
               {/* Voice Selection */}
@@ -1235,6 +1401,49 @@ function App() {
                       {status}
                     </span>
                   </div>
+
+                  {/* Live Diagnostic & Speech Stream Card */}
+                  <div className="mic-diagnostic-card" style={{ 
+                    background: 'rgba(15, 23, 42, 0.75)', 
+                    borderRadius: '8px', 
+                    padding: '12px', 
+                    marginTop: '12px', 
+                    border: '1px solid var(--glass-border)',
+                    textAlign: 'left'
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px', fontSize: '0.78rem', color: '#94a3b8' }}>
+                      <span>🎤 Live Mic Volume Level:</span>
+                      <span style={{ fontWeight: 'bold', color: micLevel > 8 ? '#4ade80' : '#64748b' }}>
+                        {micLevel}% {micLevel > 8 ? '🟢 (Audio Capturing)' : '⚪ (Silent)'}
+                      </span>
+                    </div>
+
+                    {/* Live Audio Level Meter Bar */}
+                    <div style={{ width: '100%', height: '8px', background: 'rgba(255, 255, 255, 0.08)', borderRadius: '4px', overflow: 'hidden' }}>
+                      <div style={{ 
+                        width: `${micLevel}%`, 
+                        height: '100%', 
+                        background: micLevel > 8 ? 'linear-gradient(90deg, #3b82f6, #4ade80)' : '#475569', 
+                        transition: 'width 0.05s ease-out' 
+                      }} />
+                    </div>
+
+                    {/* Real-time Streaming Speech Input Box */}
+                    <div style={{ marginTop: '10px', paddingTop: '8px', borderTop: '1px solid rgba(255,255,255,0.06)', fontSize: '0.8rem' }}>
+                      <div style={{ color: '#64748b', fontSize: '0.72rem', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                        📡 Real-Time Speech Stream:
+                      </div>
+                      <div style={{ 
+                        color: interimSpeech ? '#38bdf8' : '#64748b', 
+                        fontStyle: interimSpeech ? 'normal' : 'italic', 
+                        fontWeight: interimSpeech ? '600' : '400',
+                        wordBreak: 'break-word',
+                        minHeight: '24px'
+                      }}>
+                        {interimSpeech ? `"${interimSpeech}"` : '(Listening... speak into your microphone)'}
+                      </div>
+                    </div>
+                  </div>
                 </>
               ) : (
                 <>
@@ -1273,6 +1482,8 @@ function App() {
                 </button>
               )}
             </div>
+
+
 
             {/* Wave animation during speak/listen */}
             <div className="wave-container">
@@ -1333,13 +1544,24 @@ function App() {
 
               {/* Helper Tips */}
               {callActive && (
-                <div className="turn-helper-footer">
-                  {status === 'listening' ? (
-                    interimSpeech ? `🎤 "${interimSpeech}"` : '🎤 Go ahead and speak now!'
-                  ) :
-                    status === 'speaking' ? '🔊 Agent is currently talking. Please wait.' :
-                      status === 'thinking' ? '⚙️ Agent is thinking...' :
-                        'Preparing conversation...'}
+                <div className="turn-helper-footer" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                  <span style={{ flex: 1 }}>
+                    {status === 'listening' ? (
+                      interimSpeech ? `🎤 "${interimSpeech}"` : '🎤 Listening... Go ahead and speak now!'
+                    ) :
+                      status === 'speaking' ? '🔊 Agent is speaking. Speak anytime to interrupt.' :
+                        status === 'thinking' ? '⚙️ Agent is thinking...' :
+                          'Preparing conversation...'}
+                  </span>
+                  {status === 'listening' && interimSpeech && (
+                    <button 
+                      className="btn-primary" 
+                      style={{ padding: '4px 12px', fontSize: '0.8rem', borderRadius: '4px', cursor: 'pointer' }}
+                      onClick={() => sendUserSpeech(interimSpeech)}
+                    >
+                      Send ↵
+                    </button>
+                  )}
                 </div>
               )}
             </section>
@@ -1594,6 +1816,9 @@ function App() {
               </div>
             )}
           </section>
+        </div>
+      )}
+
       {/* Bookings & Leads Tab */}
       {activeTab === 'bookings' && (
         <div className="history-grid" style={{ gap: '20px' }}>
