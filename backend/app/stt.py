@@ -10,6 +10,12 @@ logger = logging.getLogger("voice-agent")
 # Persistent shared executor for Whisper STT API calls
 _stt_executor = ThreadPoolExecutor(max_workers=4)
 
+WHISPER_HALLUCINATIONS = {
+    "thank you", "thank you.", "thank you!", "thank you very much.", "thank you very much",
+    "thank you for watching", "thank you for watching.", "thanks", "thanks.", "thanks for watching",
+    "subtitles by", "amara.org", "bye", "bye.", "you", "uh", "um", "the end.", "goodbye", "goodbye."
+}
+
 class STTService:
     def __init__(self, api_key: str = None):
         self.api_key = api_key
@@ -31,11 +37,17 @@ class STTService:
     async def transcribe_audio(self, audio_bytes: bytes, filename: str = "speech.webm", language: str = None) -> str:
         """
         Transcribes audio bytes to text using Groq's Whisper-large-v3 with optional language lock.
+        Filters out common silent audio hallucinations like 'Thank you.'
         """
         await self._ensure_client()
         if not self.api_key:
             raise ValueError("GROQ_API_KEY is not set. Please set it in your environment or credentials.")
         try:
+            # Check minimum audio bytes (ignore tiny buffers under 0.25s)
+            if len(audio_bytes) < 8000:
+                logger.info(f"Audio buffer too short ({len(audio_bytes)} bytes). Skipping Whisper STT.")
+                return ""
+
             # Create a file-like object from raw bytes
             audio_file = io.BytesIO(audio_bytes)
             audio_file.name = filename
@@ -53,8 +65,14 @@ class STTService:
 
             loop = asyncio.get_running_loop()
             transcript_text = await loop.run_in_executor(_stt_executor, run_transcribe)
+            clean_text = transcript_text.strip()
             
-            return transcript_text.strip()
+            # Filter known Whisper silence hallucinations
+            if clean_text.lower() in WHISPER_HALLUCINATIONS or clean_text.lower().rstrip(".!") in WHISPER_HALLUCINATIONS:
+                logger.info(f"Discarded Whisper silence hallucination: '{clean_text}'")
+                return ""
+            
+            return clean_text
         except Exception as e:
             logger.error(f"Error transcribing audio with Groq: {e}")
             raise e
