@@ -16,8 +16,17 @@ class TTSService:
         selected_voice = voice_override or self.voice
         selected_rate = rate_override or "-10%"
         try:
-            # Slow down TTS by 10% (or custom rate) for a highly realistic, human-like cadence over telephone lines
             communicate = edge_tts.Communicate(text, selected_voice, rate=selected_rate)
+            audio_data = b""
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    audio_data += chunk["data"]
+            if audio_data:
+                return audio_data
+
+            # Fallback retry without rate modification
+            logger.info("Retrying edge-tts synthesis without custom rate...")
+            communicate = edge_tts.Communicate(text, selected_voice)
             audio_data = b""
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
