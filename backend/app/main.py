@@ -19,6 +19,8 @@ from app.guardrails import guardrail_service
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("voice-agent")
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
 from contextlib import asynccontextmanager
 from app.database import init_db
@@ -1085,6 +1087,14 @@ async def websocket_call_endpoint(websocket: WebSocket):
             llm_cost = 0.0
         return stt_cost + llm_cost
 
+    async def safe_send_json(data: dict):
+        try:
+            from starlette.websockets import WebSocketState
+            if websocket.client_state == WebSocketState.CONNECTED:
+                await websocket.send_json(data)
+        except Exception:
+            pass
+
     async def cancel_tasks():
         nonlocal llm_tts_task, turn_monitor_task
         if llm_tts_task and not llm_tts_task.done():
@@ -1107,7 +1117,7 @@ async def websocket_call_endpoint(websocket: WebSocket):
                     current_turn_sentences_generated.append(sentence)
                     
                     # Immediately send to browser
-                    await websocket.send_json({
+                    await safe_send_json({
                         "type": "agent_speech",
                         "text": sentence,
                         "audio": audio_base64
@@ -1134,6 +1144,10 @@ async def websocket_call_endpoint(websocket: WebSocket):
                     voice = message.get("voice", voice)
                     provider = message.get("provider") or settings.LLM_PROVIDER
                     model = message.get("model") or settings.LLM_MODEL
+                    if provider == "groq" and ("gemini" in model or not model):
+                        model = "llama-3.1-8b-instant"
+                    elif provider == "gemini" and ("llama" in model or "groq" in model or model == "gemini-3.5-flash"):
+                        model = "gemini-2.5-flash"
                     gemini_key = message.get("geminiKey")
                     groq_key = message.get("groqKey")
                     
@@ -1174,14 +1188,14 @@ async def websocket_call_endpoint(websocket: WebSocket):
                             "cost": greet_cost
                         })
                         
-                        await websocket.send_json({
+                        await safe_send_json({
                             "type": "call_started",
                             "text": greeting,
                             "audio": audio_base64
                         })
                     except Exception as tts_err:
                         logger.error(f"Failed to generate greeting TTS: {tts_err}")
-                        await websocket.send_json({
+                        await safe_send_json({
                             "type": "status",
                             "status": "error",
                             "message": f"TTS synthesis error: {str(tts_err)}"
