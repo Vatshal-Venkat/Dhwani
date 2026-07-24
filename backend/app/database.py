@@ -4,7 +4,7 @@ from sqlalchemy.orm import DeclarativeBase
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./dhwani.db")
 
-engine = create_async_engine(DATABASE_URL, echo=True)
+engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
     class_=AsyncSession,
