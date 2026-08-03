@@ -2,6 +2,8 @@ import asyncio
 import base64
 import json
 import logging
+import re
+import time
 from typing import Any, List, Optional
 from datetime import datetime
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, Request, Response
@@ -109,6 +111,57 @@ def is_semantic_speech(text: str) -> bool:
         return False
         
     return True
+
+
+def normalize_text_for_dedup(text: str) -> str:
+    if not text:
+        return ""
+    return re.sub(r'[^a-zA-Z0-9]', '', text.lower())
+
+
+def is_duplicate_user_message(new_text: str, history: list, time_threshold_seconds: float = 12.0) -> bool:
+    """
+    Determines if an incoming user message is a duplicate or near-duplicate of a recently processed user turn.
+    Prevents double-transcription/double-submission bugs without altering voice settings.
+    """
+    clean_new = normalize_text_for_dedup(new_text)
+    if not clean_new:
+        return True
+        
+    # Find the most recent user entry in history
+    last_user_entry = None
+    for msg in reversed(history):
+        if msg.get("role") == "user":
+            last_user_entry = msg
+            break
+            
+    if not last_user_entry:
+        return False
+        
+    last_user_content = last_user_entry.get("content", "")
+    clean_last = normalize_text_for_dedup(last_user_content)
+    
+    if not clean_last:
+        return False
+
+    # Check timestamp if available
+    last_timestamp = last_user_entry.get("timestamp")
+    now = time.time()
+    if last_timestamp and (now - last_timestamp > time_threshold_seconds):
+        return False
+
+    # 1. Exact match (ignoring case, punctuation, whitespace)
+    if clean_new == clean_last:
+        return True
+
+    # 2. Substring / superstring match for interim vs final speech transcript variations
+    if len(clean_new) > 4 and len(clean_last) > 4:
+        if clean_new in clean_last or clean_last in clean_new:
+            ratio = min(len(clean_new), len(clean_last)) / max(len(clean_new), len(clean_last))
+            if ratio > 0.75:
+                return True
+
+    return False
 
 
 class ConfigResponse(BaseModel):
@@ -266,14 +319,6 @@ async def list_calls(db: AsyncSession = Depends(get_db)):
     result = await db.execute(stmt)
     return result.scalars().all()
 
-@app.get("/api/calls/{call_id}", response_model=CallResponse)
-async def get_call(call_id: int, db: AsyncSession = Depends(get_db)):
-    stmt = select(Call).where(Call.id == call_id)
-    result = await db.execute(stmt)
-    call = result.scalar_one_or_none()
-    if not call:
-        raise HTTPException(status_code=404, detail="Call log not found")
-    return call
 
 
 @app.get("/api/calls/stats")
@@ -437,6 +482,16 @@ async def force_trigger_scheduled_call(id: int, db: AsyncSession = Depends(get_d
         scheduled_call.error_message = str(e)[:250]
         await db.commit()
         raise HTTPException(status_code=500, detail=f"Failed triggering scheduled call: {str(e)}")
+
+
+@app.get("/api/calls/{call_id}", response_model=CallResponse)
+async def get_call(call_id: int, db: AsyncSession = Depends(get_db)):
+    stmt = select(Call).where(Call.id == call_id)
+    result = await db.execute(stmt)
+    call = result.scalar_one_or_none()
+    if not call:
+        raise HTTPException(status_code=404, detail="Call log not found")
+    return call
 
 
 @app.post("/api/twilio/twiml")
@@ -918,10 +973,15 @@ async def websocket_twilio_endpoint(websocket: WebSocket):
                                 
                                 if not transcribed_text.strip():
                                     continue
+
+                                if is_duplicate_user_message(transcribed_text, conversation_history):
+                                    logger.info(f"Twilio STT: Ignored duplicate user message: '{transcribed_text}'")
+                                    continue
                                     
                                 conversation_history.append({
                                     "role": "user", 
                                     "content": transcribed_text,
+                                    "timestamp": time.time(),
                                     "metrics": {"stt_latency": round(stt_latency, 3)}
                                 })
                                 
@@ -1240,6 +1300,15 @@ async def websocket_call_endpoint(websocket: WebSocket):
                                 "status": "listening"
                             })
                             continue
+
+                        # Deduplication check to prevent taking duplicate user message twice
+                        if is_duplicate_user_message(transcribed_text, conversation_history):
+                            logger.info(f"Browser STT: Ignored duplicate user speech message: '{transcribed_text}'")
+                            await websocket.send_json({
+                                "type": "status",
+                                "status": "listening"
+                            })
+                            continue
                         
                         # Apply Guardrails PII Redaction
                         sanitized_text, redaction_logs = guardrail_service.sanitize_text(transcribed_text)
@@ -1272,6 +1341,7 @@ async def websocket_call_endpoint(websocket: WebSocket):
                         conversation_history.append({
                             "role": "user", 
                             "content": transcribed_text,
+                            "timestamp": time.time(),
                             "metrics": {"stt_latency": round(stt_latency, 3)}
                         })
                         
@@ -1354,9 +1424,22 @@ async def websocket_call_endpoint(websocket: WebSocket):
                     user_text = message.get("text", "")
                     if not user_text.strip():
                         continue
+
+                    # Deduplication check to prevent taking duplicate user message twice
+                    if is_duplicate_user_message(user_text, conversation_history):
+                        logger.info(f"Browser Text: Ignored duplicate user speech message: '{user_text}'")
+                        await websocket.send_json({
+                            "type": "status",
+                            "status": "listening"
+                        })
+                        continue
                     
                     logger.info(f"Received User Speech (Text Fallback): '{user_text}'")
-                    conversation_history.append({"role": "user", "content": user_text})
+                    conversation_history.append({
+                        "role": "user", 
+                        "content": user_text,
+                        "timestamp": time.time()
+                    })
                     
                     # Send thinking status
                     await websocket.send_json({
