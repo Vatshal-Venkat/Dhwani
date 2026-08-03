@@ -24,6 +24,8 @@ class TTSService:
             if audio_data:
                 return audio_data
 
+
+
             # Fallback retry without rate modification
             logger.info("Retrying edge-tts synthesis without custom rate...")
             communicate = edge_tts.Communicate(text, selected_voice)

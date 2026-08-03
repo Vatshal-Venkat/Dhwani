@@ -112,53 +112,78 @@ def is_semantic_speech(text: str) -> bool:
         
     return True
 
+from difflib import SequenceMatcher
 
 def normalize_text_for_dedup(text: str) -> str:
     if not text:
         return ""
-    return re.sub(r'[^a-zA-Z0-9]', '', text.lower())
+    clean = text.lower()
+    # Normalize common time expressions like 2:00 -> 2, 4:00 -> 4
+    clean = re.sub(r'(\d+):00', r'\1', clean)
+    # Remove punctuation
+    clean = re.sub(r'[^a-z0-9\s]', '', clean)
+    # Collapse extra whitespace
+    return " ".join(clean.split())
 
 
-def is_duplicate_user_message(new_text: str, history: list, time_threshold_seconds: float = 12.0) -> bool:
+def get_word_set(text: str) -> set:
+    norm = normalize_text_for_dedup(text)
+    return set(norm.split())
+
+
+def is_duplicate_user_message(new_text: str, history: list, time_threshold_seconds: float = 45.0) -> bool:
     """
-    Determines if an incoming user message is a duplicate or near-duplicate of a recently processed user turn.
-    Prevents double-transcription/double-submission bugs without altering voice settings.
+    Enhanced backend deduplication engine:
+    Detects if an incoming user message is a duplicate, echo, or re-trigger of ANY recent user message
+    in the conversation history within time_threshold_seconds (default 45 seconds).
+    Uses sequence matching and word set overlap to prevent double processing, even with STT variations
+    (e.g., 'is it possible for you to schedule after 2:00 p.m.' vs 'Is it possible for you to schedule after 2 p.m.').
     """
     clean_new = normalize_text_for_dedup(new_text)
     if not clean_new:
         return True
-        
-    # Find the most recent user entry in history
-    last_user_entry = None
-    for msg in reversed(history):
-        if msg.get("role") == "user":
-            last_user_entry = msg
-            break
-            
-    if not last_user_entry:
-        return False
-        
-    last_user_content = last_user_entry.get("content", "")
-    clean_last = normalize_text_for_dedup(last_user_content)
-    
-    if not clean_last:
-        return False
 
-    # Check timestamp if available
-    last_timestamp = last_user_entry.get("timestamp")
-    now = time.time()
-    if last_timestamp and (now - last_timestamp > time_threshold_seconds):
-        return False
-
-    # 1. Exact match (ignoring case, punctuation, whitespace)
-    if clean_new == clean_last:
+    words_new = get_word_set(new_text)
+    if not words_new:
         return True
 
-    # 2. Substring / superstring match for interim vs final speech transcript variations
-    if len(clean_new) > 4 and len(clean_last) > 4:
-        if clean_new in clean_last or clean_last in clean_new:
-            ratio = min(len(clean_new), len(clean_last)) / max(len(clean_new), len(clean_last))
-            if ratio > 0.75:
+    # For very short answers (e.g. "yes", "no", "ok"), if the assistant responded in between, allow it
+    if len(words_new) <= 2:
+        if history and history[-1].get("role") == "assistant":
+            return False
+
+    now = time.time()
+
+    # Search backwards through conversation history for recent user messages
+    for msg in reversed(history):
+        if msg.get("role") != "user":
+            continue
+
+        msg_time = msg.get("timestamp")
+        # If timestamp exists and message is older than threshold, stop checking older user entries
+        if msg_time and (now - msg_time > time_threshold_seconds):
+            break
+
+        past_text = msg.get("content", "")
+        clean_past = normalize_text_for_dedup(past_text)
+        if not clean_past:
+            continue
+
+        # 1. Exact normalized match
+        if clean_new == clean_past:
+            return True
+
+        # 2. SequenceMatcher similarity ratio
+        seq_ratio = SequenceMatcher(None, clean_new, clean_past).ratio()
+        if seq_ratio >= 0.70:
+            return True
+
+        # 3. Word set overlap ratio for phrasing variations
+        words_past = get_word_set(past_text)
+        if words_past and words_new:
+            intersection = words_new.intersection(words_past)
+            overlap_ratio = len(intersection) / max(len(words_new), len(words_past))
+            if overlap_ratio >= 0.60 and len(intersection) >= 3:
                 return True
 
     return False
