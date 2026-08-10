@@ -16,8 +16,10 @@ import {
   Edit3,
   Plus,
   Calendar,
-  Clock
+  Clock,
+  ShieldCheck
 } from 'lucide-react';
+import { EvalDashboard } from './components/EvalDashboard';
 
 function App() {
   // Call configuration state
@@ -105,6 +107,8 @@ function App() {
   const userSpokeVADRef = useRef(false);
   const speechTimerRef = useRef(null);
   const latestSpeechRef = useRef('');
+  const lastSentSpeechRef = useRef({ text: '', timestamp: 0 });
+  const isInterruptedRef = useRef(false);
 
   useEffect(() => {
     callActiveRef.current = callActive;
@@ -542,13 +546,73 @@ function App() {
     return true;
   };
 
+  // Linguistic Incompleteness Detector for Natural Turn Taking
+  const isIncompleteThought = (text) => {
+    if (!text || !text.trim()) return false;
+    const clean = text.trim().toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, " ").trim();
+    const words = clean.split(/\s+/).filter(w => w.length > 0);
+    if (words.length === 0) return false;
+
+    const lastWord = words[words.length - 1];
+
+    // Trailing prepositions, connectives, auxiliary verbs, or incomplete connectors
+    const trailingIncompleteWords = new Set([
+      "to", "for", "and", "or", "but", "if", "because", "that", "with", "in", "on", "at", 
+      "about", "is", "was", "are", "were", "so", "what", "when", "where", "how", "which", 
+      "can", "could", "would", "should", "is it", "can i", "could you", "is it possible",
+      "like", "such", "than", "until", "unless", "the", "a", "an", "my", "your", "our", "their", "of"
+    ]);
+
+    if (trailingIncompleteWords.has(lastWord)) {
+      return true;
+    }
+
+    // Trailing two-word phrase check (e.g. "possible for", "you to", "able to", "check if")
+    if (words.length >= 2) {
+      const lastTwo = `${words[words.length - 2]} ${lastWord}`;
+      const incompletePhrases = new Set([
+        "possible for", "you to", "able to", "check if", "wondering if", "tell me",
+        "want to", "like to", "going to", "supposed to", "have to", "need to",
+        "what about", "how about", "is it", "can you", "could you", "would you"
+      ]);
+      if (incompletePhrases.has(lastTwo)) {
+        return true;
+      }
+    }
+
+    // Clause indicator: phrase starts with incomplete question starter and has no verb/subject completion
+    if (words.length <= 6 && (clean.startsWith("is it possible") || clean.startsWith("can you check") || clean.startsWith("could we do"))) {
+      return true;
+    }
+
+    return false;
+  };
+
   const sendUserSpeech = (text) => {
     if (!text || !text.trim()) return;
+
     if (speechTimerRef.current) {
       clearTimeout(speechTimerRef.current);
       speechTimerRef.current = null;
     }
+
     const cleanText = text.trim();
+    const cleanLower = cleanText.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "").trim();
+    const now = Date.now();
+
+    // Deduplication check: ignore rapid duplicate user speech resubmissions
+    if (
+      lastSentSpeechRef.current.text &&
+      lastSentSpeechRef.current.text === cleanLower &&
+      now - lastSentSpeechRef.current.timestamp < 3500
+    ) {
+      console.log(`[sendUserSpeech] Suppressed rapid duplicate user speech submission: "${cleanText}"`);
+      return;
+    }
+
+    lastSentSpeechRef.current = { text: cleanLower, timestamp: now };
+    isInterruptedRef.current = false; // Reset interruption flag on new user turn
+
     setInterimSpeech('');
     latestSpeechRef.current = '';
     addTranscript('user', cleanText);
@@ -608,22 +672,47 @@ function App() {
         }
       }
 
-      // If browser marks result as final, send immediately
+      // Calculate dynamic silence delay based on sentence completeness
+      const isIncomplete = isIncompleteThought(currentText);
+      const silenceDelay = isIncomplete ? 1900 : 850; // 1.9s for incomplete thoughts, 850ms for completed sentences
+
+      // If browser marks result as final, check completeness before immediate sending
       if (finalTranscript && finalTranscript.trim()) {
-        sendUserSpeech(finalTranscript);
+        if (speechTimerRef.current) {
+          clearTimeout(speechTimerRef.current);
+          speechTimerRef.current = null;
+        }
+
+        if (isIncomplete) {
+          console.log(`[Turn-Taking] Final transcript received but thought is incomplete ("${finalTranscript}"). Extending silence timer (1.9s)...`);
+          speechTimerRef.current = setTimeout(() => {
+            if (latestSpeechRef.current && callActiveRef.current && !isSpeakingRef.current) {
+              console.log("[Turn-Taking] Submitting complete user speech after pause:", latestSpeechRef.current);
+              sendUserSpeech(latestSpeechRef.current);
+            }
+          }, 1900);
+          return;
+        }
+
+        // Complete thought -> send with fast 400ms delay to feel instant yet natural
+        speechTimerRef.current = setTimeout(() => {
+          if (latestSpeechRef.current && callActiveRef.current && !isSpeakingRef.current) {
+            sendUserSpeech(latestSpeechRef.current);
+          }
+        }, 400);
         return;
       }
 
-      // Otherwise, set a fast 1-second auto-submit timer on speech silence
+      // Interim silence timer with adaptive delay
       if (speechTimerRef.current) {
         clearTimeout(speechTimerRef.current);
       }
       speechTimerRef.current = setTimeout(() => {
         if (latestSpeechRef.current && callActiveRef.current && !isSpeakingRef.current) {
-          console.log("Silence detected (1.0s). Auto-submitting speech:", latestSpeechRef.current);
+          console.log(`[Turn-Taking] Silence detected (${silenceDelay}ms). Auto-submitting speech:`, latestSpeechRef.current);
           sendUserSpeech(latestSpeechRef.current);
         }
-      }, 1000);
+      }, silenceDelay);
     };
 
     recognition.onerror = (event) => {
@@ -663,16 +752,44 @@ function App() {
   };
 
   const addTranscript = (role, text) => {
-    setTranscripts(prev => [...prev, {
-      id: Date.now() + Math.random().toString(36).substr(2, 9),
-      role,
-      text,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    }]);
+    if (!text || !text.trim()) return;
+    const cleanText = text.trim();
+    const cleanLower = cleanText.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "").trim();
+
+    setTranscripts(prev => {
+      if (prev.length > 0) {
+        // Check if last transcript is identical
+        const last = prev[prev.length - 1];
+        const lastLower = last.text.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "").trim();
+        if (last.role === role && lastLower === cleanLower) {
+          console.log(`[addTranscript] Suppressed immediate duplicate for ${role}: "${cleanText}"`);
+          return prev;
+        }
+
+        // Also check if any recent transcript of the same role in the last 3 items matches
+        const recentSameRole = prev.slice(-3).filter(item => item.role === role);
+        if (recentSameRole.some(item => item.text.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "").trim() === cleanLower)) {
+          console.log(`[addTranscript] Suppressed recent duplicate for ${role}: "${cleanText}"`);
+          return prev;
+        }
+      }
+
+      return [...prev, {
+        id: Date.now() + Math.random().toString(36).substr(2, 9),
+        role,
+        text: cleanText,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      }];
+    });
   };
 
   // Play synthetic voice from Base64
   const playAgentAudio = (audioBase64, text) => {
+    if (isInterruptedRef.current) {
+      console.log("[playAgentAudio] Dropped in-flight audio packet due to barge-in interruption.");
+      return;
+    }
+
     if (isSpeakingRef.current) {
       // Queue the incoming audio chunk
       audioQueueRef.current.push({ audioBase64, text });
@@ -682,6 +799,11 @@ function App() {
   };
 
   const playNextChunk = (audioBase64, text) => {
+    if (isInterruptedRef.current) {
+      console.log("[playNextChunk] Suppressed playback due to barge-in interruption.");
+      return;
+    }
+
     isSpeakingRef.current = true;
     currentAgentTextRef.current = text;
     userSpokeVADRef.current = false;
@@ -711,6 +833,12 @@ function App() {
     };
 
     audio.onended = () => {
+      if (isInterruptedRef.current) {
+        isSpeakingRef.current = false;
+        currentAgentTextRef.current = '';
+        return;
+      }
+
       // Check queue
       if (audioQueueRef.current.length > 0) {
         const next = audioQueueRef.current.shift();
@@ -728,6 +856,12 @@ function App() {
 
     audio.onerror = (e) => {
       console.error("Audio playback error:", e);
+      if (isInterruptedRef.current) {
+        isSpeakingRef.current = false;
+        currentAgentTextRef.current = '';
+        return;
+      }
+
       // Check queue
       if (audioQueueRef.current.length > 0) {
         const next = audioQueueRef.current.shift();
@@ -743,6 +877,12 @@ function App() {
 
     audio.play().catch(e => {
       console.error("Failed to play audio:", e);
+      if (isInterruptedRef.current) {
+        isSpeakingRef.current = false;
+        currentAgentTextRef.current = '';
+        return;
+      }
+
       // Check queue
       if (audioQueueRef.current.length > 0) {
         const next = audioQueueRef.current.shift();
@@ -761,7 +901,11 @@ function App() {
   const handleBargeIn = () => {
     if (!callActiveRef.current || !isSpeakingRef.current) return;
 
-    console.log("Barge-in detected: interrupting agent playback...");
+    console.log("Barge-in detected: interrupting agent playback immediately...");
+
+    // Mark current turn as interrupted to drop any in-flight audio packets
+    isInterruptedRef.current = true;
+    isSpeakingRef.current = false;
 
     // Clear queue
     audioQueueRef.current = [];
@@ -779,15 +923,19 @@ function App() {
       }
     }
 
-    // Stop playback immediately
+    // Stop playback immediately & reset audio object
     if (audioRef.current) {
       try {
         audioRef.current.pause();
+        audioRef.current.currentTime = 0;
+        audioRef.current.src = "";
+        audioRef.current.load();
       } catch (e) {
         console.error("Error pausing audio on barge-in:", e);
       }
+      audioRef.current = null;
     }
-    isSpeakingRef.current = false;
+    currentAgentTextRef.current = '';
     setStatus('listening');
 
     // Notify backend of interruption
@@ -1222,6 +1370,14 @@ function App() {
           >
             <Calendar className="h-4 w-4" />
             Bookings & Leads
+          </button>
+          <button 
+            className={`tab-btn ${activeTab === 'evals' ? 'active' : ''}`}
+            onClick={() => setActiveTab('evals')}
+            disabled={callActive}
+          >
+            <ShieldCheck className="h-4 w-4" />
+            Voice CI & Evals
           </button>
         </div>
       </header>
@@ -1930,6 +2086,11 @@ function App() {
             )}
           </section>
         </div>
+      )}
+
+      {/* Voice CI & Evaluations Tab */}
+      {activeTab === 'evals' && (
+        <EvalDashboard agents={agents} />
       )}
     </div>
   );
