@@ -34,6 +34,15 @@ async def lifespan(app: FastAPI):
     try:
         await init_db()
         logger.info("Database initialization completed successfully.")
+        
+        # Seed evaluation benchmark suites
+        try:
+            from app.eval_router import seed_eval_suites
+            from app.database import AsyncSessionLocal
+            async with AsyncSessionLocal() as session:
+                await seed_eval_suites(session)
+        except Exception as seed_err:
+            logger.error(f"Error seeding evaluation suites: {seed_err}")
     except Exception as e:
         logger.error(f"Error during database initialization: {e}")
         
@@ -52,6 +61,9 @@ async def lifespan(app: FastAPI):
         logger.error(f"Failed to stop call scheduler: {e}")
 
 app = FastAPI(title="Outbound Voice Agent API", lifespan=lifespan)
+
+from app.eval_router import router as eval_router
+app.include_router(eval_router)
 
 # Enable CORS for frontend integration
 app.add_middleware(
@@ -136,8 +148,7 @@ def is_duplicate_user_message(new_text: str, history: list, time_threshold_secon
     Enhanced backend deduplication engine:
     Detects if an incoming user message is a duplicate, echo, or re-trigger of ANY recent user message
     in the conversation history within time_threshold_seconds (default 45 seconds).
-    Uses sequence matching and word set overlap to prevent double processing, even with STT variations
-    (e.g., 'is it possible for you to schedule after 2:00 p.m.' vs 'Is it possible for you to schedule after 2 p.m.').
+    Uses sequence matching and word set overlap to prevent double processing, even with STT variations.
     """
     clean_new = normalize_text_for_dedup(new_text)
     if not clean_new:
@@ -147,11 +158,6 @@ def is_duplicate_user_message(new_text: str, history: list, time_threshold_secon
     if not words_new:
         return True
 
-    # For very short answers (e.g. "yes", "no", "ok"), if the assistant responded in between, allow it
-    if len(words_new) <= 2:
-        if history and history[-1].get("role") == "assistant":
-            return False
-
     now = time.time()
 
     # Search backwards through conversation history for recent user messages
@@ -160,14 +166,23 @@ def is_duplicate_user_message(new_text: str, history: list, time_threshold_secon
             continue
 
         msg_time = msg.get("timestamp")
-        # If timestamp exists and message is older than threshold, stop checking older user entries
-        if msg_time and (now - msg_time > time_threshold_seconds):
-            break
-
         past_text = msg.get("content", "")
         clean_past = normalize_text_for_dedup(past_text)
         if not clean_past:
             continue
+
+        # Hard check 1: If exact same text received within 4 seconds, ALWAYS treat as duplicate!
+        if msg_time and (now - msg_time < 4.0) and (clean_new == clean_past):
+            return True
+
+        # If timestamp exists and message is older than threshold, stop checking older user entries
+        if msg_time and (now - msg_time > time_threshold_seconds):
+            break
+
+        # For very short answers (e.g. "yes", "no", "ok"), if the assistant responded in between, allow it
+        if len(words_new) <= 2:
+            if history and history[-1].get("role") == "assistant":
+                continue
 
         # 1. Exact normalized match
         if clean_new == clean_past:
@@ -1460,11 +1475,29 @@ async def websocket_call_endpoint(websocket: WebSocket):
                         continue
                     
                     logger.info(f"Received User Speech (Text Fallback): '{user_text}'")
-                    conversation_history.append({
-                        "role": "user", 
-                        "content": user_text,
-                        "timestamp": time.time()
-                    })
+                    now = time.time()
+                    
+                    # Merge rapid continuations into single turn if user sent fragment within 3.0s
+                    if conversation_history and conversation_history[-1].get("role") == "user":
+                        last_time = conversation_history[-1].get("timestamp", 0)
+                        if now - last_time < 3.0:
+                            combined_text = f"{conversation_history[-1]['content']} {user_text}".strip()
+                            logger.info(f"Browser Text: Merged rapid continuation into single user turn: '{combined_text}'")
+                            conversation_history[-1]["content"] = combined_text
+                            conversation_history[-1]["timestamp"] = now
+                            user_text = combined_text
+                        else:
+                            conversation_history.append({
+                                "role": "user", 
+                                "content": user_text,
+                                "timestamp": now
+                            })
+                    else:
+                        conversation_history.append({
+                            "role": "user", 
+                            "content": user_text,
+                            "timestamp": now
+                        })
                     
                     # Send thinking status
                     await websocket.send_json({
