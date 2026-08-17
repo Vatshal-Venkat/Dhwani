@@ -98,6 +98,24 @@ AVAILABLE_TOOLS = [
             },
             "required": ["name", "phone"]
         }
+    },
+    {
+        "name": "transfer_to_human",
+        "description": "Initiates a live transfer to a real human customer representative when the user asks for a real person or confirms they want to be connected to a human.",
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "reason": {
+                    "type": "STRING",
+                    "description": "Reason for human transfer (e.g., 'customer dissatisfied', 'explicit human request', 'complex issue')"
+                },
+                "department": {
+                    "type": "STRING",
+                    "description": "Target department for transfer (e.g., 'Senior Customer Support', 'Technical Specialist')"
+                }
+            },
+            "required": ["reason"]
+        }
     }
 ]
 
@@ -203,6 +221,23 @@ async def execute_tool(function_name: str, arguments: Dict[str, Any]) -> Dict[st
                     "status": "success",
                     "lead_id": new_lead.id,
                     "message": f"Lead for {name} recorded successfully."
+                }
+
+            elif function_name == "transfer_to_human":
+                reason = arguments.get("reason", "Customer requested human support or expressed dissatisfaction")
+                dept = arguments.get("department", "Senior Customer Support")
+                target_phone = "+1-800-555-0199"
+
+                logger.info(f"Human Transfer Tool Executed: Department='{dept}', Reason='{reason}'")
+
+                return {
+                    "status": "success",
+                    "action": "human_transfer",
+                    "transfer_triggered": True,
+                    "department": dept,
+                    "target_phone": target_phone,
+                    "reason": reason,
+                    "message": f"Initiating live transfer to {dept} ({target_phone}). Please hold on while I connect your call."
                 }
 
             else:

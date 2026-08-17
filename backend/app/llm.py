@@ -110,17 +110,28 @@ class LLMService:
                 logger.warning("GROQ_API_KEY is not set.")
 
     def _build_system_prompt(self, base_prompt: str) -> str:
-        """Appends conversational pacing and tool calling capabilities to system prompt."""
+        """Appends conversational pacing, tool calling capabilities, and human transfer protocol to system prompt."""
         tool_desc = json.dumps(AVAILABLE_TOOLS, indent=2)
         prompt = (
             base_prompt +
             "\n\n[ACTION EXECUTION ENGINE & TOOL INSTRUCTIONS]\n"
-            "You have access to real-time action tools to create/check appointments and record customer leads.\n"
+            "You have access to real-time action tools to create/check appointments, record customer leads, and transfer callers to human representatives.\n"
             f"Available Tools Schema:\n{tool_desc}\n\n"
-            "When the user requests an action (e.g. checking slots, booking an appointment, registering interest), output a tool execution tag in this exact format:\n"
+            "When the user requests an action (e.g. checking slots, booking an appointment, transferring to human), output a tool execution tag in this exact format:\n"
             "[ACTION: tool_name({\"param1\": \"val1\", ...})]\n"
             "If you need to book an appointment or capture a lead, ask for the customer's name and details if missing, or use default details from context.\n"
             "Do NOT invent false confirmation codes without invoking the create_booking tool."
+            "\n\n[CUSTOMER DISSATISFACTION & HUMAN TRANSFER PROTOCOL]\n"
+            "1. DISSATISFACTION DETECTION: If the customer expresses frustration, says you are not being helpful (e.g., 'you aren't helping', 'this isn't working', 'waste of time', 'this is useless', 'can I speak to a person'), or explicitly asks for a human/agent/representative/manager:\n"
+            "   - Do NOT argue or repeat prior unhelpful answers.\n"
+            "   - Immediately ASK PERMISSION to connect them with a real human representative:\n"
+            "     \"I apologize, it seems like I'm not helping as well as you need. Would you like me to connect you with a real human representative from our team right now?\"\n"
+            "2. PERMISSION CONFIRMATION & REDIRECTION:\n"
+            "   - IF the customer confirms or says yes (e.g., 'yes', 'yeah', 'please', 'connect me', 'sure', 'do that'):\n"
+            "     - Output the tool execution tag: [ACTION: transfer_to_human({\"reason\": \"Customer requested human after dissatisfaction\", \"department\": \"Senior Customer Support\"})]\n"
+            "     - Say: \"Connecting you to a live support representative now. Please hold on...\"\n"
+            "   - IF the customer declines or says no (e.g., 'no', 'it's okay', 'let's try again'):\n"
+            "     - Say: \"Understood! I'm here to help. What else can I assist you with today?\"\n"
             "\n\n[CONVERSATIONAL RULE: You must always respond in the same language that the user spoke to you in their latest message.]"
             "\n\n[CONVERSATIONAL PACING RULE: You must sound like a natural, polite human during a telephone call. "
             "1. Use occasional conversational filler words naturally at the beginning of your response to acknowledge the user (e.g., 'Ah, got it.', 'Oh, okay.', 'Hmm, let me check...', 'Sure, I can help with that...'). "

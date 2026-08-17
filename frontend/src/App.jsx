@@ -79,6 +79,8 @@ function App() {
   const [transcripts, setTranscripts] = useState([]);
   const [errorMessage, setErrorMessage] = useState('');
   const [interimSpeech, setInterimSpeech] = useState('');
+  const [humanTransferActive, setHumanTransferActive] = useState(false);
+  const [humanTransferInfo, setHumanTransferInfo] = useState(null);
 
   // WebSockets and Audio References
   const wsRef = useRef(null);
@@ -1182,6 +1184,8 @@ function App() {
 
     socket.onopen = () => {
       setStatus('connected');
+      setHumanTransferActive(false);
+      setHumanTransferInfo(null);
       addTranscript('system', 'Call connected. Agent is initiating greeting...');
 
       // Send configurations
@@ -1210,6 +1214,26 @@ function App() {
           addTranscript('agent', data.text);
           setStatus('listening');
         }
+
+        // Check if response indicates human transfer
+        if (data.text && (data.text.includes('live support representative') || data.text.includes('connect you with a real human'))) {
+          if (data.text.includes('Connecting you') || data.text.includes('transferring')) {
+            setHumanTransferActive(true);
+            setHumanTransferInfo({
+              department: 'Senior Customer Support',
+              target_phone: '+1-800-555-0199',
+              message: 'Connecting call to live representative...'
+            });
+          }
+        }
+      } else if (data.type === 'human_transfer_initiated') {
+        setHumanTransferActive(true);
+        setHumanTransferInfo({
+          department: data.department || 'Senior Customer Support',
+          target_phone: data.target_phone || '+1-800-555-0199',
+          message: data.message || 'Connecting to human representative...'
+        });
+        addTranscript('system', '📞 Live Human Support Transfer Initiated (+1-800-555-0199)');
       } else if (data.type === 'user_speech_transcript') {
         addTranscript('user', data.text);
       } else if (data.type === 'status') {
@@ -1615,6 +1639,38 @@ function App() {
             {errorMessage && (
               <div className="error-banner">
                 {errorMessage}
+              </div>
+            )}
+
+            {/* Live Human Transfer Alert Banner */}
+            {humanTransferActive && (
+              <div style={{
+                background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.25), rgba(5, 150, 105, 0.15))',
+                border: '1px solid #34d399',
+                borderRadius: '12px',
+                padding: '14px 18px',
+                margin: '14px 0',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                boxShadow: '0 8px 25px rgba(52, 211, 153, 0.2)'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <div style={{ background: '#10b981', borderRadius: '50%', padding: '8px', display: 'flex' }}>
+                    <UserCheck size={20} style={{ color: '#fff' }} />
+                  </div>
+                  <div>
+                    <h4 style={{ fontSize: '13px', fontWeight: '800', color: '#34d399', margin: 0 }}>
+                      📞 Live Human Specialist Transfer Triggered
+                    </h4>
+                    <p style={{ fontSize: '11px', color: 'var(--text-primary)', margin: '2px 0 0 0' }}>
+                      {humanTransferInfo?.department || 'Senior Support Team'} • Transferring call to <strong>{humanTransferInfo?.target_phone || '+1-800-555-0199'}</strong>
+                    </p>
+                  </div>
+                </div>
+                <span className="status-badge-inline listening" style={{ padding: '4px 10px', fontSize: '10px', fontWeight: '800' }}>
+                  TRANSFERRING
+                </span>
               </div>
             )}
 
