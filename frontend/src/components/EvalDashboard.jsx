@@ -17,7 +17,11 @@ import {
   TrendingUp,
   TrendingDown,
   Activity,
-  UserCheck
+  UserCheck,
+  Wand2,
+  Sparkles,
+  Check,
+  X
 } from 'lucide-react';
 
 const API_BASE = 'http://localhost:8000';
@@ -43,6 +47,13 @@ export function EvalDashboard({ agents }) {
   const [compareRunB, setCompareRunB] = useState('');
   const [diffData, setDiffData] = useState(null);
 
+  // Auto-Tune Modal state
+  const [showAutoTuneModal, setShowAutoTuneModal] = useState(false);
+  const [autoTuneLoading, setAutoTuneLoading] = useState(false);
+  const [autoTuneData, setAutoTuneData] = useState(null);
+  const [autoTuneApplying, setAutoTuneApplying] = useState(false);
+  const [autoTuneSuccessMsg, setAutoTuneSuccessMsg] = useState('');
+
   // Fetch initial suites & runs
   useEffect(() => {
     fetchSuites();
@@ -54,6 +65,63 @@ export function EvalDashboard({ agents }) {
       setSelectedAgentId(agents[0].id);
     }
   }, [agents]);
+
+  const handleTriggerAutoTune = async (runId) => {
+    setAutoTuneLoading(true);
+    setShowAutoTuneModal(true);
+    setAutoTuneSuccessMsg('');
+    try {
+      const res = await fetch(`${API_BASE}/api/eval/autotune`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ run_id: parseInt(runId) })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAutoTuneData(data);
+      } else {
+        alert('Failed to generate auto-tuned system prompt.');
+        setShowAutoTuneModal(false);
+      }
+    } catch (err) {
+      console.error('Error triggering auto-tune:', err);
+      alert('Error connecting to auto-tuner service.');
+      setShowAutoTuneModal(false);
+    } finally {
+      setAutoTuneLoading(false);
+    }
+  };
+
+  const handleApplyAutoTune = async () => {
+    if (!autoTuneData || !autoTuneData.agent_id) return;
+    setAutoTuneApplying(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/eval/autotune/apply`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          agent_id: autoTuneData.agent_id,
+          optimized_system_prompt: autoTuneData.optimized_system_prompt,
+          version_tag: autoTuneData.suggested_version_tag
+        })
+      });
+      if (res.ok) {
+        const result = await res.json();
+        setAutoTuneSuccessMsg(`✅ ${result.message}`);
+        setTimeout(() => {
+          setShowAutoTuneModal(false);
+          fetchRuns();
+        }, 1800);
+      } else {
+        alert('Failed to apply prompt update.');
+      }
+    } catch (err) {
+      console.error('Error applying auto-tune prompt:', err);
+      alert('Error applying prompt update');
+    } finally {
+      setAutoTuneApplying(false);
+    }
+  };
 
   const fetchSuites = async () => {
     try {
@@ -427,6 +495,28 @@ export function EvalDashboard({ agents }) {
                       <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
                         Version Tag: <code style={{ color: 'var(--accent-cyan)' }}>{selectedRun.prompt_version}</code> • Model: <code>{selectedRun.model_name}</code>
                       </p>
+                      
+                      <button
+                        onClick={() => handleTriggerAutoTune(selectedRun.id)}
+                        disabled={autoTuneLoading}
+                        className="btn-toggle active"
+                        style={{
+                          background: 'linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%)',
+                          borderColor: '#a78bfa',
+                          color: '#ffffff',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          padding: '6px 14px',
+                          borderRadius: '8px',
+                          fontWeight: '700',
+                          fontSize: '12px',
+                          marginTop: '10px',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        <Wand2 size={14} /> Auto-Tune System Prompt with AI
+                      </button>
                     </div>
 
                     <div style={{ background: 'rgba(6, 182, 212, 0.15)', border: '1px solid var(--accent-cyan)', borderRadius: '14px', padding: '14px 20px', textAlign: 'center' }}>
@@ -703,6 +793,131 @@ export function EvalDashboard({ agents }) {
             </div>
           </div>
         </section>
+      )}
+
+      {/* Auto-Tune Modal Overlay */}
+      {showAutoTuneModal && (
+        <div className="modal-overlay" style={{
+          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: 'rgba(3, 7, 18, 0.85)', backdropFilter: 'blur(8px)',
+          zIndex: 1000, display: 'flex', justifyContent: 'center', alignItems: 'center', padding: '20px'
+        }}>
+          <div className="glass-panel" style={{
+            width: '100%', maxWidth: '900px', maxHeight: '90vh', overflowY: 'auto',
+            border: '1px solid var(--accent-violet)', boxShadow: '0 20px 50px rgba(139, 92, 246, 0.25)', padding: '24px'
+          }}>
+            <div className="panel-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--glass-border)', paddingBottom: '14px', marginBottom: '16px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <div style={{ background: 'linear-gradient(135deg, #8b5cf6, #6366f1)', padding: '8px', borderRadius: '10px' }}>
+                  <Wand2 size={20} style={{ color: '#fff' }} />
+                </div>
+                <div>
+                  <h2 className="panel-title" style={{ fontSize: '18px' }}>AI System Prompt Auto-Tuner</h2>
+                  <p style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Self-healing prompt optimizer for Agent #{autoTuneData?.agent_name || ''}</p>
+                </div>
+              </div>
+              <button onClick={() => setShowAutoTuneModal(false)} style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}>
+                <X size={20} />
+              </button>
+            </div>
+
+            {autoTuneLoading ? (
+              <div style={{ textAlign: 'center', padding: '60px 20px', color: 'var(--accent-cyan)' }}>
+                <RefreshCw className="spin" size={36} style={{ marginBottom: '16px' }} />
+                <h3 style={{ fontSize: '16px', fontWeight: '700', color: 'var(--text-primary)' }}>Analyzing Failure Modes & Synthesizing Optimized System Prompt...</h3>
+                <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px' }}>Evaluating prompt vulnerabilities across failing synthetic benchmark cases</p>
+              </div>
+            ) : autoTuneData ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                {/* Success Banner */}
+                {autoTuneSuccessMsg && (
+                  <div style={{ background: 'rgba(52, 211, 153, 0.2)', border: '1px solid #34d399', color: '#34d399', padding: '12px 16px', borderRadius: '10px', fontWeight: '700', fontSize: '13px' }}>
+                    {autoTuneSuccessMsg}
+                  </div>
+                )}
+
+                {/* AI Diagnosis Card */}
+                <div style={{ background: 'rgba(139, 92, 246, 0.12)', border: '1px solid rgba(139, 92, 246, 0.3)', borderRadius: '12px', padding: '16px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                    <Sparkles size={18} style={{ color: '#a78bfa' }} />
+                    <h3 style={{ fontSize: '14px', fontWeight: '800', color: '#c4b5fd' }}>AI Failure Mode Diagnosis</h3>
+                  </div>
+                  <p style={{ fontSize: '13px', color: 'var(--text-primary)', lineHeight: '1.5' }}>{autoTuneData.diagnosis}</p>
+                </div>
+
+                {/* Key Changes Added */}
+                <div>
+                  <h4 style={{ fontSize: '13px', fontWeight: '700', color: 'var(--text-secondary)', marginBottom: '10px' }}>Guardrail & Behavior Fixes Implemented:</h4>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {autoTuneData.key_changes?.map((change, idx) => (
+                      <div key={idx} style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', background: 'rgba(3, 7, 18, 0.5)', padding: '10px 14px', borderRadius: '8px', border: '1px solid var(--glass-border)' }}>
+                        <Check size={16} style={{ color: '#34d399', marginTop: '2px', flexShrink: 0 }} />
+                        <span style={{ fontSize: '12px', color: 'var(--text-primary)' }}>{change}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Side-by-Side Prompt Diff */}
+                <div>
+                  <h4 style={{ fontSize: '13px', fontWeight: '700', color: 'var(--text-secondary)', marginBottom: '10px' }}>System Prompt Diff View</h4>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '14px' }}>
+                    <div>
+                      <div style={{ fontSize: '11px', fontWeight: '700', color: '#ef4444', marginBottom: '6px' }}>ORIGINAL SYSTEM PROMPT</div>
+                      <textarea
+                        readOnly
+                        value={autoTuneData.current_system_prompt}
+                        style={{
+                          width: '100%', height: '220px', background: 'rgba(3, 7, 18, 0.7)', border: '1px solid rgba(239, 68, 68, 0.3)',
+                          borderRadius: '8px', padding: '12px', color: '#fca5a5', fontFamily: 'monospace', fontSize: '11px', resize: 'none'
+                        }}
+                      />
+                    </div>
+
+                    <div>
+                      <div style={{ fontSize: '11px', fontWeight: '700', color: '#34d399', marginBottom: '6px' }}>AUTO-TUNED SYSTEM PROMPT ({autoTuneData.suggested_version_tag})</div>
+                      <textarea
+                        value={autoTuneData.optimized_system_prompt}
+                        onChange={(e) => setAutoTuneData({ ...autoTuneData, optimized_system_prompt: e.target.value })}
+                        style={{
+                          width: '100%', height: '220px', background: 'rgba(3, 7, 18, 0.7)', border: '1px solid rgba(52, 211, 153, 0.4)',
+                          borderRadius: '8px', padding: '12px', color: '#a7f3d0', fontFamily: 'monospace', fontSize: '11px', resize: 'none'
+                        }}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Modal Action Buttons */}
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '12px', borderTop: '1px solid var(--glass-border)', paddingTop: '16px' }}>
+                  <button
+                    onClick={() => setShowAutoTuneModal(false)}
+                    className="btn-toggle"
+                    style={{ padding: '8px 16px' }}
+                  >
+                    Cancel
+                  </button>
+
+                  <button
+                    onClick={handleApplyAutoTune}
+                    disabled={autoTuneApplying}
+                    className="btn-toggle active"
+                    style={{
+                      background: 'linear-gradient(135deg, #10b981, #059669)',
+                      borderColor: '#34d399', color: '#fff', padding: '10px 20px', fontWeight: '800'
+                    }}
+                  >
+                    {autoTuneApplying ? (
+                      <><RefreshCw className="spin" size={16} /> Applying to Agent DB...</>
+                    ) : (
+                      <><Check size={16} /> Apply Optimized System Prompt to Agent</>
+                    )}
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
       )}
     </div>
   );

@@ -10,6 +10,7 @@ from app.database import get_db, AsyncSessionLocal
 from app.models import Agent
 from app.eval_models import EvalSuite, EvalTestCase, EvalRun, EvalResult
 from app.eval_engine import eval_engine
+from app.prompt_autotuner import prompt_autotuner
 
 logger = logging.getLogger("voice-agent")
 
@@ -35,6 +36,15 @@ class RunEvalRequest(BaseModel):
     suite_id: int
     prompt_version: Optional[str] = "v1.0"
     override_model: Optional[str] = None
+
+class AutoTuneRequest(BaseModel):
+    run_id: int
+
+class ApplyAutoTuneRequest(BaseModel):
+    agent_id: int
+    optimized_system_prompt: str
+    version_tag: Optional[str] = "v1.2-autotuned"
+
 
 
 @router.get("/suites")
@@ -296,6 +306,77 @@ async def compare_eval_runs(run_a: int = Query(...), run_b: int = Query(...), db
             "improvements_count": improvements_count
         },
         "matrix": diff_matrix
+    }
+
+
+@router.post("/autotune")
+async def autotune_system_prompt(payload: AutoTuneRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Analyzes failed test cases from an evaluation run and synthesizes
+    an optimized system prompt patch.
+    """
+    eval_run = await db.get(EvalRun, payload.run_id)
+    if not eval_run:
+        raise HTTPException(status_code=404, detail=f"EvalRun ID {payload.run_id} not found.")
+
+    agent = await db.get(Agent, eval_run.agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail=f"Agent ID {eval_run.agent_id} not found.")
+
+    # Fetch results and test cases
+    res_stmt = select(EvalResult).where(EvalResult.run_id == payload.run_id)
+    res_exec = await db.execute(res_stmt)
+    eval_results = list(res_exec.scalars().all())
+
+    results_with_cases = []
+    for r in eval_results:
+        tc = await db.get(EvalTestCase, r.test_case_id)
+        results_with_cases.append({
+            "result": r,
+            "test_case": tc
+        })
+
+    try:
+        autotune_output = await prompt_autotuner.generate_optimized_prompt(
+            agent=agent,
+            eval_run=eval_run,
+            results_with_cases=results_with_cases
+        )
+
+        return {
+            "run_id": eval_run.id,
+            "agent_id": agent.id,
+            "agent_name": agent.name,
+            "current_system_prompt": agent.system_prompt,
+            "diagnosis": autotune_output.get("diagnosis", ""),
+            "key_changes": autotune_output.get("key_changes", []),
+            "optimized_system_prompt": autotune_output.get("optimized_system_prompt", agent.system_prompt),
+            "suggested_version_tag": autotune_output.get("suggested_version_tag", "v1.2-autotuned")
+        }
+
+    except Exception as e:
+        logger.error(f"Auto-Tuning Engine Error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to auto-tune system prompt: {str(e)}")
+
+
+@router.post("/autotune/apply")
+async def apply_autotuned_prompt(payload: ApplyAutoTuneRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Applies the auto-tuned system prompt directly to the target Agent in the database.
+    """
+    agent = await db.get(Agent, payload.agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail=f"Agent ID {payload.agent_id} not found.")
+
+    agent.system_prompt = payload.optimized_system_prompt
+    await db.commit()
+    await db.refresh(agent)
+
+    return {
+        "message": f"Successfully updated system prompt for Agent '{agent.name}'.",
+        "agent_id": agent.id,
+        "version_tag": payload.version_tag,
+        "updated_system_prompt": agent.system_prompt
     }
 
 
